@@ -1,31 +1,18 @@
 import os
 import logging
-from datetime import time
-from zoneinfo import ZoneInfo
+from datetime import datetime
+from typing import Optional
 
-from openai import OpenAI
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
-    filters,
 )
 
 # =========================
 # 基本設定
 # =========================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("請先設定 TELEGRAM_BOT_TOKEN")
-if not OPENAI_API_KEY:
-    raise ValueError("請先設定 OPENAI_API_KEY")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-TAIWAN_TZ = ZoneInfo("Asia/Taipei")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -33,129 +20,199 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# 台灣時區字串，給 JobQueue 使用
+TZ = "Asia/Taipei"
+
+# Job 名稱
+JOB_WEATHER = "daily_weather_report"
+JOB_NEWS = "daily_news_report"
+JOB_SERVER = "daily_server_report"
+JOB_STOCK = "daily_stock_report"
+
 
 # =========================
-# AI 回答函式
+# 資料取得區（目前先用穩定示範版）
+# 之後可替換成真實 API
 # =========================
-def ask_openai(user_message: str) -> str:
+
+def get_weather_report() -> str:
+    """
+    之後可改成串接中央氣象署或其他天氣 API
+    """
+    return (
+        "1. 天氣回報\n"
+        "今天天氣晴朗，氣溫約 25～30 度，適合戶外活動。"
+        "整體天氣穩定，暫無明顯降雨訊號。"
+    )
+
+
+def get_news_report() -> str:
+    """
+    之後可改成串接新聞 API / RSS
+    """
+    return (
+        "2. AI新聞、科技新聞、股市新聞重點\n"
+        "- AI新聞：目前 AI 應用持續擴展，企業導入自動化與知識助理的需求升高。\n"
+        "- 科技新聞：雲端服務、AI 晶片與企業軟體整合仍是市場焦點。\n"
+        "- 股市新聞：科技股表現仍受利率、市場情緒與大型權值股帶動。"
+    )
+
+
+def get_server_report() -> str:
+    """
+    之後可改成串接 Zeabur API / 健康檢查端點 / 自訂監控
+    """
+    return (
+        "3. 伺服器狀況回報\n"
+        "目前伺服器運作正常，未偵測到異常警報。"
+        "若需進一步監控 CPU、記憶體、磁碟與服務健康狀態，可再串接監控 API。"
+    )
+
+
+def get_stock_report() -> str:
+    """
+    之後可改成串接股票 API
+    """
+    return (
+        "4. 台積電及 TSM ADR 股價\n"
+        "目前為示範資料模式，尚未串接即時股價來源。\n"
+        "可於下一版接入台股與 ADR 報價 API。"
+    )
+
+
+def build_full_report() -> str:
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    report = (
+        f"今日企業助理回報\n"
+        f"回報時間：{now_str}\n\n"
+        f"{get_weather_report()}\n\n"
+        f"{get_news_report()}\n\n"
+        f"{get_server_report()}\n\n"
+        f"{get_stock_report()}"
+    )
+    return report
+
+
+# =========================
+# 排程工作
+# =========================
+
+async def send_weather_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
     try:
-        logger.info(f"送出 OpenAI 請求，內容：{user_message}")
+        msg = get_weather_report()
+        logger.info(f"發送天氣回報，chat_id={chat_id}")
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.exception("send_weather_job 發生錯誤")
+        await context.bot.send_message(chat_id=chat_id, text=f"天氣回報發生錯誤：{e}")
 
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是 Tony 的 OpenClaw AI 企業助理。"
-                        "請使用繁體中文回覆，語氣專業、清楚、簡潔。"
-                        "你擅長企業營運、流程改善、AI導入、SaaS、RPA、自動化、管理報表與行政支援。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": user_message,
-                },
-            ],
+
+async def send_news_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
+    try:
+        msg = get_news_report()
+        logger.info(f"發送新聞回報，chat_id={chat_id}")
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.exception("send_news_job 發生錯誤")
+        await context.bot.send_message(chat_id=chat_id, text=f"新聞回報發生錯誤：{e}")
+
+
+async def send_server_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
+    try:
+        msg = get_server_report()
+        logger.info(f"發送伺服器回報，chat_id={chat_id}")
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.exception("send_server_job 發生錯誤")
+        await context.bot.send_message(chat_id=chat_id, text=f"伺服器回報發生錯誤：{e}")
+
+
+async def send_stock_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.chat_id
+    try:
+        msg = get_stock_report()
+        logger.info(f"發送股價回報，chat_id={chat_id}")
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception as e:
+        logger.exception("send_stock_job 發生錯誤")
+        await context.bot.send_message(chat_id=chat_id, text=f"股價回報發生錯誤：{e}")
+
+
+# =========================
+# 工具函式
+# =========================
+
+def remove_existing_jobs(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> int:
+    current_jobs = context.job_queue.jobs()
+    removed = 0
+
+    for job in current_jobs:
+        if job.chat_id == chat_id:
+            job.schedule_removal()
+            removed += 1
+
+    return removed
+
+
+def get_chat_jobs(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    return [job for job in context.job_queue.jobs() if job.chat_id == chat_id]
+
+
+def build_status_text(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
+    jobs = get_chat_jobs(context, chat_id)
+
+    if not jobs:
+        return (
+            "目前尚未啟用自動回報。\n\n"
+            "可使用 /enable_report 啟動。"
         )
 
-        answer = response.output_text.strip()
-        logger.info("OpenAI 回應成功")
-        return answer
-
-    except Exception as e:
-        logger.exception("ask_openai 發生錯誤")
-        return f"發生錯誤，暫時無法取得 AI 回覆：{e}"
-
-
-# =========================
-# 自動回報內容
-# =========================
-def generate_daily_report_text() -> str:
-    prompt = """
-請用繁體中文產出「今日企業助理回報」。
-格式請清楚分段，內容包含：
-
-1. 天氣回報（若無法取得即寫：尚未獲取天氣資訊）
-2. AI新聞、科技新聞、股市新聞重點
-3. 伺服器狀況回報（若無法取得即寫：尚未獲取伺服器狀況資訊）
-4. 台積電及 TSM ADR 股價（若無法取得即寫：尚未獲取股價資訊）
-
-請整理成簡潔、像主管晨會可直接閱讀的格式。
-"""
-    return ask_openai(prompt)
-
-
-async def send_scheduled_report(context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        job = context.job
-        chat_id = job.data["chat_id"]
-        report_type = job.data.get("report_type", "一般回報")
-
-        logger.info(f"開始執行排程回報：{report_type}，chat_id={chat_id}")
-
-        if report_type == "天氣回報":
-            prompt = "請用繁體中文提供今天的天氣回報。若無法取得即寫：尚未獲取天氣資訊。"
-        elif report_type == "AI新聞、科技新聞、股市新聞重點":
-            prompt = (
-                "請用繁體中文整理今天的 AI 新聞、科技新聞、股市新聞重點。"
-                "若無法取得特定資料，請明確寫出尚未獲取。"
-            )
-        elif report_type == "伺服器狀況回報":
-            prompt = "請用繁體中文提供伺服器狀況回報。若無法取得即寫：尚未獲取伺服器狀況資訊。"
-        elif report_type == "台積電及 TSM ADR 股價":
-            prompt = "請用繁體中文提供台積電及 TSM ADR 股價摘要。若無法取得即寫：尚未獲取股價資訊。"
-        else:
-            prompt = "請用繁體中文提供一份今日企業助理摘要回報。"
-
-        report = ask_openai(prompt)
-        message = f"【自動回報】{report_type}\n\n{report}"
-
-        await context.bot.send_message(chat_id=chat_id, text=message)
-        logger.info(f"排程回報發送成功：{report_type}")
-
-    except Exception as e:
-        logger.exception("send_scheduled_report 發生錯誤")
-        try:
-            if context.job and context.job.data and "chat_id" in context.job.data:
-                await context.bot.send_message(
-                    chat_id=context.job.data["chat_id"],
-                    text=f"自動回報執行失敗：{e}",
-                )
-        except Exception:
-            logger.exception("回傳排程錯誤訊息失敗")
+    return (
+        "目前自動回報已啟用。\n\n"
+        "排程如下：\n"
+        "1. 天氣回報：每天上午 8:30\n"
+        "2. AI新聞、科技新聞、股市新聞重點：每天上午 8:45\n"
+        "3. 伺服器狀況回報：每天上午 8:00 與下午 8:00\n"
+        "4. 台積電及 TSM ADR 股價：每天中午 12:00\n\n"
+        f"目前此聊天室共有 {len(jobs)} 個排程工作。"
+    )
 
 
 # =========================
-# 指令
+# 指令 handlers
 # =========================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"收到 /start，chat_id={update.effective_chat.id}")
     text = (
-        "您好！我是 Tony's OpenClaw AI 助理。\n\n"
-        "可用指令：\n"
-        "/start - 啟動機器人\n"
-        "/help - 查看說明\n"
+        "你好，我是 Tony's OpenClaw AI 助理。\n"
+        "我可以協助你處理 AI、SaaS、教育訓練、營運管理與流程自動化相關問題。\n\n"
+        "可使用以下指令：\n"
+        "/start - 啟動說明\n"
+        "/help - 查看功能說明\n"
         "/enable_report - 啟動自動回報\n"
-        "/disable_report - 停止自動回報\n"
-        "/report_now - 立即測試一次回報\n\n"
-        "也可以直接輸入問題與我對話。"
+        "/disable_report - 關閉自動回報\n"
+        "/report_now - 立即產生一次完整回報\n"
+        "/status - 查看目前自動回報狀態"
     )
     await update.message.reply_text(text)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"收到 /help，chat_id={update.effective_chat.id}")
     text = (
-        "指令說明：\n\n"
-        "/enable_report - 啟動每日自動回報\n"
-        "/disable_report - 停止每日自動回報\n"
-        "/report_now - 立即測試一次回報\n\n"
-        "目前自動回報時間：\n"
-        "1. 天氣回報：每天上午 8:30\n"
-        "2. AI新聞、科技新聞、股市新聞重點：每天上午 8:45\n"
-        "3. 伺服器狀況回報：每天上午 8:00 與下午 8:00\n"
-        "4. 台積電及 TSM ADR 股價：每天中午 12:00\n"
+        "功能說明：\n\n"
+        "/enable_report\n"
+        "- 啟動每日自動回報\n\n"
+        "/disable_report\n"
+        "- 關閉目前聊天室的所有自動回報\n\n"
+        "/report_now\n"
+        "- 立即測試一次完整回報\n\n"
+        "/status\n"
+        "- 查看目前是否已啟動排程"
     )
     await update.message.reply_text(text)
 
@@ -167,56 +224,51 @@ async def enable_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("收到 /enable_report，正在設定自動回報...")
 
-        if context.job_queue is None:
-            logger.error("job_queue 未啟用")
-            await update.message.reply_text("錯誤：job_queue 未啟用，請確認 requirements.txt 已使用 job-queue 版本。")
-            return
+        # 先移除舊排程，避免重複
+        removed = remove_existing_jobs(context, chat_id)
+        logger.info(f"已移除舊排程 {removed} 個，chat_id={chat_id}")
 
-        # 先移除同 chat_id 舊排程，避免重複
-        current_jobs = context.job_queue.jobs()
-        removed_count = 0
-        for job in current_jobs:
-            if job.data and job.data.get("chat_id") == chat_id:
-                job.schedule_removal()
-                removed_count += 1
-
-        logger.info(f"已移除舊排程數量：{removed_count}")
-
-        # 設定排程
+        # 每天 08:30 天氣
         context.job_queue.run_daily(
-            send_scheduled_report,
-            time=time(hour=8, minute=30, tzinfo=TAIWAN_TZ),
-            data={"chat_id": chat_id, "report_type": "天氣回報"},
-            name=f"weather_{chat_id}",
+            send_weather_job,
+            time=datetime.strptime("08:30", "%H:%M").time(),
+            chat_id=chat_id,
+            name=JOB_WEATHER,
         )
 
+        # 每天 08:45 新聞
         context.job_queue.run_daily(
-            send_scheduled_report,
-            time=time(hour=8, minute=45, tzinfo=TAIWAN_TZ),
-            data={"chat_id": chat_id, "report_type": "AI新聞、科技新聞、股市新聞重點"},
-            name=f"news_{chat_id}",
+            send_news_job,
+            time=datetime.strptime("08:45", "%H:%M").time(),
+            chat_id=chat_id,
+            name=JOB_NEWS,
         )
 
+        # 每天 08:00 伺服器
         context.job_queue.run_daily(
-            send_scheduled_report,
-            time=time(hour=8, minute=0, tzinfo=TAIWAN_TZ),
-            data={"chat_id": chat_id, "report_type": "伺服器狀況回報"},
-            name=f"server_am_{chat_id}",
+            send_server_job,
+            time=datetime.strptime("08:00", "%H:%M").time(),
+            chat_id=chat_id,
+            name=f"{JOB_SERVER}_morning",
         )
 
+        # 每天 20:00 伺服器
         context.job_queue.run_daily(
-            send_scheduled_report,
-            time=time(hour=20, minute=0, tzinfo=TAIWAN_TZ),
-            data={"chat_id": chat_id, "report_type": "伺服器狀況回報"},
-            name=f"server_pm_{chat_id}",
+            send_server_job,
+            time=datetime.strptime("20:00", "%H:%M").time(),
+            chat_id=chat_id,
+            name=f"{JOB_SERVER}_evening",
         )
 
+        # 每天 12:00 股價
         context.job_queue.run_daily(
-            send_scheduled_report,
-            time=time(hour=12, minute=0, tzinfo=TAIWAN_TZ),
-            data={"chat_id": chat_id, "report_type": "台積電及 TSM ADR 股價"},
-            name=f"tsm_{chat_id}",
+            send_stock_job,
+            time=datetime.strptime("12:00", "%H:%M").time(),
+            chat_id=chat_id,
+            name=JOB_STOCK,
         )
+
+        logger.info(f"/enable_report 設定完成，chat_id={chat_id}")
 
         await update.message.reply_text(
             "自動回報已啟動。\n\n"
@@ -226,9 +278,6 @@ async def enable_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3. 伺服器狀況回報：每天上午 8:00 和下午 8:00\n"
             "4. 台積電及 TSM ADR 股價：每天中午 12:00"
         )
-
-        logger.info(f"/enable_report 設定完成，chat_id={chat_id}")
-
     except Exception as e:
         logger.exception("enable_report 發生錯誤")
         await update.message.reply_text(f"enable_report 發生錯誤：{e}")
@@ -239,19 +288,12 @@ async def disable_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         logger.info(f"收到 /disable_report，chat_id={chat_id}")
 
-        if context.job_queue is None:
-            await update.message.reply_text("目前 job_queue 未啟用。")
-            return
+        removed = remove_existing_jobs(context, chat_id)
 
-        removed_count = 0
-        for job in context.job_queue.jobs():
-            if job.data and job.data.get("chat_id") == chat_id:
-                job.schedule_removal()
-                removed_count += 1
-
-        await update.message.reply_text(f"自動回報已停止，共移除 {removed_count} 個排程。")
-        logger.info(f"/disable_report 完成，移除 {removed_count} 個排程，chat_id={chat_id}")
-
+        await update.message.reply_text(
+            f"自動回報已關閉。\n"
+            f"本次共移除 {removed} 個排程。"
+        )
     except Exception as e:
         logger.exception("disable_report 發生錯誤")
         await update.message.reply_text(f"disable_report 發生錯誤：{e}")
@@ -264,68 +306,44 @@ async def report_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("收到 /report_now，正在產生測試回報，請稍候...")
 
-        report = generate_daily_report_text()
+        report = build_full_report()
         await update.message.reply_text(report)
-
-        logger.info(f"/report_now 執行成功，chat_id={chat_id}")
 
     except Exception as e:
         logger.exception("report_now 發生錯誤")
         await update.message.reply_text(f"report_now 發生錯誤：{e}")
 
 
-# =========================
-# 一般聊天
-# =========================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        user_text = update.message.text
         chat_id = update.effective_chat.id
+        logger.info(f"收到 /status，chat_id={chat_id}")
 
-        logger.info(f"收到一般訊息，chat_id={chat_id}，內容={user_text}")
-
-        await update.message.reply_text("收到，正在整理回覆...")
-
-        answer = ask_openai(user_text)
-        await update.message.reply_text(answer)
-
-        logger.info(f"一般訊息回覆成功，chat_id={chat_id}")
-
+        text = build_status_text(context, chat_id)
+        await update.message.reply_text(text)
     except Exception as e:
-        logger.exception("handle_message 發生錯誤")
-        await update.message.reply_text(f"處理訊息時發生錯誤：{e}")
+        logger.exception("status 發生錯誤")
+        await update.message.reply_text(f"status 發生錯誤：{e}")
 
 
 # =========================
-# 錯誤處理
+# 啟動主程式
 # =========================
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.exception("全域錯誤處理器捕捉到例外", exc_info=context.error)
 
-    try:
-        if isinstance(update, Update) and update.effective_message:
-            await update.effective_message.reply_text(f"系統發生錯誤：{context.error}")
-    except Exception:
-        logger.exception("error_handler 回傳錯誤訊息失敗")
-
-
-# =========================
-# 主程式
-# =========================
 def main():
+    if not BOT_TOKEN:
+        raise ValueError("找不到 TELEGRAM_BOT_TOKEN，請先設定環境變數。")
+
     logger.info("Tony's OpenClaw AI 助理 已啟動...")
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).timezone(TZ).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("enable_report", enable_report))
     app.add_handler(CommandHandler("disable_report", disable_report))
     app.add_handler(CommandHandler("report_now", report_now))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    app.add_error_handler(error_handler)
+    app.add_handler(CommandHandler("status", status))
 
     app.run_polling(drop_pending_updates=True)
 
