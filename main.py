@@ -336,7 +336,7 @@ def main():
 
     logger.info("Tony's OpenClaw AI 助理 已啟動...")
 
-    app = Application.builder().token(BOT_TOKEN).timezone(TZ).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
