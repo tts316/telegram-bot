@@ -1,13 +1,10 @@
-def get_training_market_report() -> str:
-    return """5. 台灣補教 / 培訓市場情報
-- 市場新聞：近期台灣教育培訓、證照班、企業內訓與 AI 應用課程持續成長，企業對短期實戰型培訓需求增加。
-- 補教觀察：語言、職能提升、證照培訓與 AI 工具應用，仍是熱門招生主題。
-- Threads 熱點：近期常見討論聚焦在 AI 課程是否實用、轉職培訓值不值得、短期技能班的就業效果。
-- Dcard 熱點：網友常討論補習班口碑、課程 CP 值、師資實戰經驗，以及學完後是否真正能找工作。
+from config import TRAINING_NEWS_KEYWORDS, SOCIAL_KEYWORDS
+from skills.news_fetcher import fetch_news_bundle
+from skills.social_fetcher import fetch_social_bundle
+from skills.openai_summarizer import summarize_market_intel
 
-目前為模板版摘要。
-後續可升級為：
-1. 自動抓台灣補教 / 培訓相關新聞
-2. 搜尋 Threads 關鍵字熱門討論
-3. 搜尋 Dcard 關鍵字熱門討論
-4. 用 OpenAI 自動整理成每日情報簡報"""
+
+def get_training_market_report() -> str:
+    news_items = fetch_news_bundle(TRAINING_NEWS_KEYWORDS, per_keyword=3)
+    social_items = fetch_social_bundle(SOCIAL_KEYWORDS, per_keyword=2)
+    return summarize_market_intel(news_items, social_items)

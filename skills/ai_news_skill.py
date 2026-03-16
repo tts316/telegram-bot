@@ -1,7 +1,13 @@
-def get_ai_news_report() -> str:
-    return """2. AI新聞、科技新聞、股市新聞重點
-- AI新聞：近期企業持續加速導入生成式 AI，重點集中在客服自動化、知識庫查詢與內部營運流程優化。
-- 科技新聞：雲端、資料平台與 AI Agent 應用整合仍是企業數位轉型主軸。
-- 股市新聞：科技股與 AI 概念股仍為市場焦點，但短期仍需留意國際市場波動與利率變化。
+from skills.news_fetcher import fetch_news_bundle
+from skills.openai_summarizer import summarize_ai_news
 
-若要改成真正最新新聞，後續可接 Google News、新聞 API 或 OpenAI 摘要流程。"""
+
+def get_ai_news_report() -> str:
+    keywords = [
+        "OpenAI AI 新聞",
+        "生成式 AI 科技新聞",
+        "台積電 產業新聞",
+        "美股 科技股 新聞",
+    ]
+    news_items = fetch_news_bundle(keywords, per_keyword=3)
+    return summarize_ai_news(news_items)
