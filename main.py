@@ -1,7 +1,7 @@
 import os
 import logging
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import (
@@ -21,26 +21,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-# 台灣時區字串，給 JobQueue 使用
-TZ = "Asia/Taipei"
+TZ = ZoneInfo("Asia/Taipei")
 
 # Job 名稱
 JOB_WEATHER = "daily_weather_report"
 JOB_NEWS = "daily_news_report"
-JOB_SERVER = "daily_server_report"
+JOB_SERVER_MORNING = "daily_server_report_morning"
+JOB_SERVER_EVENING = "daily_server_report_evening"
 JOB_STOCK = "daily_stock_report"
 
 
 # =========================
-# 資料取得區（目前先用穩定示範版）
+# 資料取得區（目前為穩定示範版）
 # 之後可替換成真實 API
 # =========================
 
 def get_weather_report() -> str:
-    """
-    之後可改成串接中央氣象署或其他天氣 API
-    """
     return (
         "1. 天氣回報\n"
         "今天天氣晴朗，氣溫約 25～30 度，適合戶外活動。"
@@ -49,9 +45,6 @@ def get_weather_report() -> str:
 
 
 def get_news_report() -> str:
-    """
-    之後可改成串接新聞 API / RSS
-    """
     return (
         "2. AI新聞、科技新聞、股市新聞重點\n"
         "- AI新聞：目前 AI 應用持續擴展，企業導入自動化與知識助理的需求升高。\n"
@@ -61,9 +54,6 @@ def get_news_report() -> str:
 
 
 def get_server_report() -> str:
-    """
-    之後可改成串接 Zeabur API / 健康檢查端點 / 自訂監控
-    """
     return (
         "3. 伺服器狀況回報\n"
         "目前伺服器運作正常，未偵測到異常警報。"
@@ -72,9 +62,6 @@ def get_server_report() -> str:
 
 
 def get_stock_report() -> str:
-    """
-    之後可改成串接股票 API
-    """
     return (
         "4. 台積電及 TSM ADR 股價\n"
         "目前為示範資料模式，尚未串接即時股價來源。\n"
@@ -83,7 +70,7 @@ def get_stock_report() -> str:
 
 
 def build_full_report() -> str:
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
     report = (
         f"今日企業助理回報\n"
         f"回報時間：{now_str}\n\n"
@@ -224,46 +211,40 @@ async def enable_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("收到 /enable_report，正在設定自動回報...")
 
-        # 先移除舊排程，避免重複
         removed = remove_existing_jobs(context, chat_id)
         logger.info(f"已移除舊排程 {removed} 個，chat_id={chat_id}")
 
-        # 每天 08:30 天氣
         context.job_queue.run_daily(
             send_weather_job,
-            time=datetime.strptime("08:30", "%H:%M").time(),
+            time=time(hour=8, minute=30, tzinfo=TZ),
             chat_id=chat_id,
             name=JOB_WEATHER,
         )
 
-        # 每天 08:45 新聞
         context.job_queue.run_daily(
             send_news_job,
-            time=datetime.strptime("08:45", "%H:%M").time(),
+            time=time(hour=8, minute=45, tzinfo=TZ),
             chat_id=chat_id,
             name=JOB_NEWS,
         )
 
-        # 每天 08:00 伺服器
         context.job_queue.run_daily(
             send_server_job,
-            time=datetime.strptime("08:00", "%H:%M").time(),
+            time=time(hour=8, minute=0, tzinfo=TZ),
             chat_id=chat_id,
-            name=f"{JOB_SERVER}_morning",
+            name=JOB_SERVER_MORNING,
         )
 
-        # 每天 20:00 伺服器
         context.job_queue.run_daily(
             send_server_job,
-            time=datetime.strptime("20:00", "%H:%M").time(),
+            time=time(hour=20, minute=0, tzinfo=TZ),
             chat_id=chat_id,
-            name=f"{JOB_SERVER}_evening",
+            name=JOB_SERVER_EVENING,
         )
 
-        # 每天 12:00 股價
         context.job_queue.run_daily(
             send_stock_job,
-            time=datetime.strptime("12:00", "%H:%M").time(),
+            time=time(hour=12, minute=0, tzinfo=TZ),
             chat_id=chat_id,
             name=JOB_STOCK,
         )
@@ -308,7 +289,6 @@ async def report_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         report = build_full_report()
         await update.message.reply_text(report)
-
     except Exception as e:
         logger.exception("report_now 發生錯誤")
         await update.message.reply_text(f"report_now 發生錯誤：{e}")
@@ -337,6 +317,7 @@ def main():
     logger.info("Tony's OpenClaw AI 助理 已啟動...")
 
     app = Application.builder().token(BOT_TOKEN).build()
+    app.job_queue.scheduler.configure(timezone=TZ)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
