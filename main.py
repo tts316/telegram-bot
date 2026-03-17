@@ -1,3 +1,6 @@
+import urllib3
+urllib3.disable_warnings()
+
 import traceback
 from datetime import time
 from zoneinfo import ZoneInfo
