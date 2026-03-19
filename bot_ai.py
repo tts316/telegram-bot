@@ -104,7 +104,7 @@ def main():
 
     app.job_queue.run_daily(
         daily_push,
-        time=time(hour=9, minute=0, tzinfo=tz)
+        time=time(hour=17, minute=8, tzinfo=tz)
     )
 
     app.run_polling()
