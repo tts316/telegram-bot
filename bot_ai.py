@@ -1,6 +1,7 @@
 import os
 import logging
 import feedparser
+import pytz
 from datetime import time
 
 from telegram import Update
@@ -16,6 +17,7 @@ from openai import OpenAI
 # ===== 環境變數 =====
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN 未設定")
@@ -23,8 +25,11 @@ if not TELEGRAM_BOT_TOKEN:
 if not OPENAI_API_KEY:
     raise ValueError("❌ OPENAI_API_KEY 未設定")
 
-# 👉 設定你的 Telegram Chat ID（很重要）
-TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
+if not TARGET_CHAT_ID:
+    raise ValueError("❌ TARGET_CHAT_ID 未設定")
+
+# ===== 時區 =====
+tz = pytz.timezone("Asia/Taipei")
 
 # ===== OpenAI =====
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -36,6 +41,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ===== 系統提示 =====
+SYSTEM_PROMPT = """
+你是 Tony's OpenClaw AI 助理。
+
+請使用繁體中文回答，並符合：
+- 專業
+- 精簡
+- 可執行
+
+優先提供：
+1. 商業建議
+2. AI導入策略
+3. 培訓與市場分析
+"""
+
 # ===== 抓新聞 =====
 def fetch_news():
     url = "https://news.google.com/rss/search?q=台灣 補教 培訓 AI 教育&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
@@ -46,6 +66,22 @@ def fetch_news():
         news.append(entry.title)
 
     return "\n".join(news)
+
+# ===== AI 回答 =====
+def ask_ai(user_text: str) -> str:
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_text},
+            ],
+        )
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        logger.error(f"OpenAI Error: {e}")
+        return f"⚠️ AI錯誤：{str(e)}"
 
 # ===== 產生廣告文案 =====
 def generate_marketing():
@@ -77,6 +113,7 @@ def generate_marketing():
 
     return response.choices[0].message.content
 
+
 # ===== 指令 =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -84,8 +121,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 OpenClaw AI 助理已啟動\n\n"
         f"你的 Chat ID：{chat_id}\n"
-        "👉 請把這個 ID 設到 Zeabur 環境變數 TARGET_CHAT_ID"
+        "👉 請確認已設定 TARGET_CHAT_ID"
     )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📌 指令：\n"
+        "/start\n"
+        "/marketing\n"
+        "或直接輸入問題"
+    )
+
 
 async def marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📊 產生今日行銷文案中...")
@@ -94,16 +141,40 @@ async def marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(result)
 
+
+# ===== 訊息處理 =====
+async def reply_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+
+    logger.info(f"User: {user_text}")
+
+    reply = ask_ai(user_text)
+
+    logger.info(f"AI: {reply}")
+
+    await update.message.reply_text(reply)
+
+
 # ===== 自動推播 =====
 async def daily_push(context: ContextTypes.DEFAULT_TYPE):
     logger.info("⏰ 執行每日推播")
 
-    result = generate_marketing()
+    try:
+        result = generate_marketing()
 
-    await context.bot.send_message(
-        chat_id=TARGET_CHAT_ID,
-        text="📢 每日行銷文案\n\n" + result
-    )
+        await context.bot.send_message(
+            chat_id=TARGET_CHAT_ID,
+            text="📢 每日行銷文案\n\n" + result
+        )
+
+    except Exception as e:
+        logger.error(f"推播錯誤: {e}")
+
+
+# ===== 錯誤處理 =====
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"❌ Exception: {context.error}")
+
 
 # ===== 主程式 =====
 def main():
@@ -113,16 +184,24 @@ def main():
 
     # 指令
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("marketing", marketing))
 
-    # 排程（每天09:00）
+    # 訊息
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_message))
+
+    # 錯誤
+    app.add_error_handler(error_handler)
+
+    # ===== 每日 09:00 台灣時間 =====
     app.job_queue.run_daily(
         daily_push,
-        time=time(hour=9, minute=0)
+        time=time(hour=9, minute=0, tzinfo=tz)
     )
 
     logger.info("✅ Bot is running...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
