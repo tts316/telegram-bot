@@ -85,9 +85,10 @@ def ask_ai(user_text: str) -> str:
 
 # ===== 產生廣告文案 =====
 def generate_marketing():
-    news = fetch_news()
+    try:
+        news = fetch_news()
 
-    prompt = f"""
+        prompt = f"""
 你是一位台灣頂級補教產業行銷顧問。
 
 請根據以下最新市場資訊：
@@ -103,16 +104,25 @@ def generate_marketing():
 要求：
 - 繁體中文
 - 高轉換
-- 貼近台灣市場
 """
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-    )
+        logger.info("🧠 呼叫 OpenAI...")
 
-    return response.choices[0].message.content
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            timeout=30  # 🔥 關鍵（避免卡死）
+        )
 
+        result = response.choices[0].message.content
+
+        logger.info("✅ OpenAI 回應完成")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ generate_marketing error: {e}")
+        return f"⚠️ 產生文案失敗：{str(e)}"
 
 # ===== 指令 =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
