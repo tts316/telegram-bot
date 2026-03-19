@@ -1,3 +1,4 @@
+from daily_marketing_skill import generate_ad_copy
 import os
 import logging
 from telegram import Update
@@ -65,6 +66,13 @@ def ask_ai(user_text: str) -> str:
 
 
 # ===== 指令 =====
+async def marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📊 正在產生今日行銷文案...")
+    
+    result = generate_ad_copy()
+    
+    await update.message.reply_text(result)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Tony's OpenClaw AI 助理 已啟動\n\n"
@@ -104,7 +112,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # ===== 主程式 =====
 def main():
     logger.info("🚀 Bot starting...")
-
+    app.add_handler(CommandHandler("marketing", marketing))
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
