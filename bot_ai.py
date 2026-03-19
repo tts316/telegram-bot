@@ -57,8 +57,15 @@ SYSTEM_PROMPT = """
 """
 
 # ===== 抓新聞 =====
+import urllib.parse
+
 def fetch_news():
-    url = "https://news.google.com/rss/search?q=台灣 補教 培訓 AI 教育&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    keyword = "台灣 補教 培訓 AI 教育"
+    
+    encoded_keyword = urllib.parse.quote(keyword)
+
+    url = f"https://news.google.com/rss/search?q={encoded_keyword}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+
     feed = feedparser.parse(url)
 
     news = []
