@@ -140,43 +140,16 @@ def save_to_notebook(chat_id, content):
 # ===== AI文案生成 =====
 def generate_marketing(chat_id):
     try:
-        # ===== 取得市場資料 =====
         market_data, links = fetch_market_intel(chat_id)
 
-        keyword = user_keywords.get(chat_id, "")
-        source = user_sources.get(chat_id, "")
+        market_text = "\n".join(market_data)[:1000]
 
-        # ===== 限制長度（避免 timeout）=====
-        market_text = "\n".join(market_data)
-        market_text = market_text[:1000]
-
-        # ===== Prompt =====
         prompt = f"""
 {MARKETING_PROMPT}
 
-【市場情報】
 {market_text}
-
-【關鍵字】
-{keyword}
-
-【來源】
-{source}
-
-請產出：
-
-1️⃣ Facebook廣告
-2️⃣ 招生文案
-3️⃣ LINE短文
-4️⃣ 三個標題
-5️⃣ CTA
-6️⃣ 🎬 AI影音腳本（分鏡 + 字幕 + 語氣）
-
-👉 市場機會
-👉 競品差異
 """
 
-        # ===== GPT 呼叫（加長 timeout）=====
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
@@ -185,7 +158,6 @@ def generate_marketing(chat_id):
 
         result = response.choices[0].message.content
 
-        # ===== 加回來源連結 =====
         if links:
             clean_links = [l.split("?")[0] for l in links]
             result += "\n\n📎 市場資料來源：\n" + "\n".join(clean_links)
@@ -193,10 +165,8 @@ def generate_marketing(chat_id):
         return result
 
     except Exception as e:
-        logger.error(f"GPT error: {e}")
-
-        # ===== fallback（避免整個壞掉）=====
-        return "⚠️ 系統忙碌或資料過多，請稍後再試 /marketing"
+        print("🔥 OpenAI ERROR:", e)   # 👈 加這行
+        return f"⚠️ 錯誤：{str(e)}"   # 👈 改這行
 
 # ===== 指令 =====
 
