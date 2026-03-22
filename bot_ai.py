@@ -3,6 +3,10 @@ import logging
 import feedparser
 import urllib.parse
 import pytz
+import datetime
+import requests
+
+from bs4 import BeautifulSoup
 from datetime import time
 
 from telegram import Update
@@ -29,9 +33,10 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ===== 動態策略（核心）=====
+# ===== 動態策略 =====
 user_keywords = {}
 user_sources = {}
+user_topics = {}
 
 # ===== Prompt =====
 MARKETING_PROMPT = """
@@ -55,67 +60,115 @@ MARKETING_PROMPT = """
 3️⃣ LINE短文案
 4️⃣ 三個吸引標題
 5️⃣ CTA（行動呼籲）
-
-語氣：
-專業 + 行銷 + 有成交力
 """
 
-# ===== 抓新聞 =====
-def fetch_news(chat_id):
+# ===== 市場情報抓取 =====
+def fetch_market_intel(chat_id):
     try:
-        keyword = user_keywords.get(
-            chat_id,
-            "台灣 AI 培訓 數位轉型 職能教育"
-        )
+        keyword = user_keywords.get(chat_id, "台灣 AI 培訓")
+        source = user_sources.get(chat_id, "")
 
-        encoded = urllib.parse.quote(keyword)
+        query = f"{keyword} {source}"
+        encoded = urllib.parse.quote(query)
 
-        url = f"https://news.google.com/rss/search?q={encoded}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        results = []
 
-        feed = feedparser.parse(url)
+        headers = {"User-Agent": "Mozilla/5.0"}
 
-        news_list = []
-        for entry in feed.entries[:5]:
-            news_list.append({
-                "title": entry.title,
-                "link": entry.link
-            })
+        # ===== Google News =====
+        news_url = f"https://news.google.com/rss/search?q={encoded}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        feed = feedparser.parse(news_url)
 
-        return news_list
+        for entry in feed.entries[:3]:
+            results.append(f"📰 {entry.title}")
+
+        # ===== PTT =====
+        try:
+            ptt_url = f"https://www.ptt.cc/bbs/Soft_Job/search?q={encoded}"
+            res = requests.get(ptt_url, headers=headers, timeout=5)
+
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, "html.parser")
+                titles = soup.select(".title a")
+
+                for t in titles[:3]:
+                    results.append(f"💬 PTT: {t.text.strip()}")
+        except:
+            pass
+
+        # ===== Dcard =====
+        try:
+            dcard_url = f"https://www.dcard.tw/search?query={encoded}"
+            res = requests.get(dcard_url, headers=headers, timeout=5)
+
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, "html.parser")
+                posts = soup.select("h2")
+
+                for p in posts[:3]:
+                    results.append(f"📱 Dcard: {p.text.strip()}")
+        except:
+            pass
+
+        # ===== fallback =====
+        if not results:
+            results.append(f"{keyword} 市場趨勢")
+
+        return "\n".join(results)
 
     except Exception as e:
-        logger.error(f"RSS error: {e}")
-        return []
+        logger.error(f"Market intel error: {e}")
+        return "市場資料取得失敗"
 
-# ===== 產生文案 =====
+# ===== Notebook儲存 =====
+def save_to_notebook(chat_id, content):
+    try:
+        topic = user_topics.get(chat_id, "AI行銷")
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+        filename = f"notebook_{topic}_{today}.txt"
+
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write("\n\n====================\n")
+            f.write(content)
+
+        logger.info(f"Saved to {filename}")
+
+    except Exception as e:
+        logger.error(f"Notebook error: {e}")
+
+# ===== AI文案生成 =====
 def generate_marketing(chat_id):
     try:
-        news_data = fetch_news(chat_id)
+        market_data = fetch_market_intel(chat_id)
 
-        keyword = user_keywords.get(chat_id, "AI培訓")
-        source = user_sources.get(chat_id, "Google News / 台灣市場")
-
-        news_text = "\n".join([n["title"] for n in news_data])
-        links_text = "\n".join([n["link"] for n in news_data])
+        keyword = user_keywords.get(chat_id, "")
+        source = user_sources.get(chat_id, "")
 
         prompt = f"""
 {MARKETING_PROMPT}
 
-市場關鍵字：
+【市場情報】
+{market_data}
+
+【搜尋關鍵字】
 {keyword}
 
-市場來源策略：
+【來源策略】
 {source}
 
-市場資訊：
-{news_text}
+請輸出：
 
-另外請產出：
+1️⃣ Facebook廣告文案（高轉換）
+2️⃣ 招生文案
+3️⃣ LINE短文
+4️⃣ 三個標題
+5️⃣ CTA
+6️⃣ 🎬 AI影音腳本（分鏡 + 字幕 + 語氣）
 
-🎬 AI影音生成提示詞（30秒短影片）：
-- 分鏡
-- 字幕
-- 配音語氣
+另外補充：
+👉 市場機會
+👉 競品差異策略
 """
 
         response = client.chat.completions.create(
@@ -124,15 +177,9 @@ def generate_marketing(chat_id):
             timeout=25
         )
 
-        result = response.choices[0].message.content
-
-        if links_text:
-            result += "\n\n📎 市場資料來源：\n" + links_text
-
-        return result
+        return response.choices[0].message.content
 
     except Exception as e:
-        logger.error(f"Marketing error: {e}")
         return f"❌ 文案產生失敗：{str(e)}"
 
 # ===== 指令 =====
@@ -141,54 +188,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     await update.message.reply_text(
-        f"✅ OpenClaw 啟動\n\n"
-        f"你的 Chat ID：{chat_id}\n\n"
+        f"✅ OpenClaw v2.6 啟動\n\n"
+        f"Chat ID：{chat_id}\n\n"
         "指令：\n"
         "/marketing\n"
         "/settime 09:00\n"
         "/setkeyword AI 課程 轉職\n"
-        "/setsource 資策會 MIC AI 市場"
+        "/setsource 巨匠 Tibame\n"
+        "/settopic AI市場"
     )
 
-# ===== 手動產文案 =====
 async def marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    await update.message.reply_text("📊 產生中...")
+    await update.message.reply_text("📊 分析市場 + 產生文案中...")
 
     result = generate_marketing(chat_id)
 
+    save_to_notebook(chat_id, result)
+
     await update.message.reply_text(result)
 
-# ===== 設定關鍵字 =====
 async def setkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-
     text = " ".join(context.args)
-
-    if not text:
-        await update.message.reply_text("❌ 用法：/setkeyword AI 課程 轉職")
-        return
 
     user_keywords[chat_id] = text
+    await update.message.reply_text(f"✅ 關鍵字：{text}")
 
-    await update.message.reply_text(f"✅ 關鍵字設定完成：\n{text}")
-
-# ===== 設定來源 =====
 async def setsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-
     text = " ".join(context.args)
 
-    if not text:
-        await update.message.reply_text("❌ 用法：/setsource 資策會 MIC AI")
-        return
-
     user_sources[chat_id] = text
+    await update.message.reply_text(f"✅ 來源：{text}")
 
-    await update.message.reply_text(f"✅ 市場來源設定：\n{text}")
+async def settopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = " ".join(context.args)
 
-# ===== 設定推播時間 =====
+    user_topics[chat_id] = text
+    await update.message.reply_text(f"✅ Notebook主題：{text}")
+
 async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
@@ -201,7 +242,6 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for job in jobs:
             job.schedule_removal()
 
-        # 新增 job
         context.job_queue.run_daily(
             daily_push,
             time=time(hour=hour, minute=minute, tzinfo=tz),
@@ -209,10 +249,10 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name=str(chat_id)
         )
 
-        await update.message.reply_text(f"✅ 推播時間設定為 {text}")
+        await update.message.reply_text(f"✅ 推播時間：{text}")
 
     except:
-        await update.message.reply_text("❌ 格式錯誤：/settime 09:30")
+        await update.message.reply_text("❌ 格式錯誤 /settime 09:00")
 
 # ===== 自動推播 =====
 async def daily_push(context: ContextTypes.DEFAULT_TYPE):
@@ -220,9 +260,11 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE):
 
     result = generate_marketing(chat_id)
 
+    save_to_notebook(chat_id, result)
+
     await context.bot.send_message(
         chat_id=chat_id,
-        text="📢 每日行銷文案\n\n" + result
+        text="📢 每日市場文案\n\n" + result
     )
 
 # ===== 主程式 =====
@@ -233,9 +275,9 @@ def main():
     app.add_handler(CommandHandler("marketing", marketing))
     app.add_handler(CommandHandler("setkeyword", setkeyword))
     app.add_handler(CommandHandler("setsource", setsource))
+    app.add_handler(CommandHandler("settopic", settopic))
     app.add_handler(CommandHandler("settime", settime))
 
-    # 預設推播（防呆）
     if TARGET_CHAT_ID:
         app.job_queue.run_daily(
             daily_push,
