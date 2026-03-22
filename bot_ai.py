@@ -64,6 +64,9 @@ MARKETING_PROMPT = """
 
 # ===== 市場情報抓取 =====
 def fetch_market_intel(chat_id):
+    results = []
+    links = []
+
     try:
         keyword = user_keywords.get(chat_id, "台灣 AI 培訓")
         source = user_sources.get(chat_id, "")
@@ -71,54 +74,61 @@ def fetch_market_intel(chat_id):
         query = f"{keyword} {source}"
         encoded = urllib.parse.quote(query)
 
-        results = []
-
         headers = {"User-Agent": "Mozilla/5.0"}
 
-        # ===== Google News =====
-        news_url = f"https://news.google.com/rss/search?q={encoded}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
-        feed = feedparser.parse(news_url)
-
-        for entry in feed.entries[:3]:
-            results.append(f"📰 {entry.title}")
-
-        # ===== PTT =====
+        # Google News
         try:
-            ptt_url = f"https://www.ptt.cc/bbs/Soft_Job/search?q={encoded}"
-            res = requests.get(ptt_url, headers=headers, timeout=5)
+            news_url = f"https://news.google.com/rss/search?q={encoded}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+            feed = feedparser.parse(news_url)
 
-            if res.status_code == 200:
-                soup = BeautifulSoup(res.text, "html.parser")
-                titles = soup.select(".title a")
+            for entry in feed.entries[:2]:
+                results.append(f"📰 {entry.title}")
+                links.append(entry.link)
+        except Exception as e:
+            print("Google News error:", e)
 
-                for t in titles[:3]:
-                    results.append(f"💬 PTT: {t.text.strip()}")
-        except:
-            pass
-
-        # ===== Dcard =====
+        # PTT
         try:
-            dcard_url = f"https://www.dcard.tw/search?query={encoded}"
-            res = requests.get(dcard_url, headers=headers, timeout=5)
+            res = requests.get(
+                f"https://www.ptt.cc/bbs/Soft_Job/search?q={encoded}",
+                headers=headers,
+                timeout=5
+            )
+            soup = BeautifulSoup(res.text, "html.parser")
 
-            if res.status_code == 200:
-                soup = BeautifulSoup(res.text, "html.parser")
-                posts = soup.select("h2")
+            for t in soup.select(".title a")[:2]:
+                results.append(f"💬 PTT: {t.text.strip()}")
+                links.append("https://www.ptt.cc" + t.get("href"))
+        except Exception as e:
+            print("PTT error:", e)
 
-                for p in posts[:3]:
-                    results.append(f"📱 Dcard: {p.text.strip()}")
-        except:
-            pass
+        # Dcard
+        try:
+            res = requests.get(
+                f"https://www.dcard.tw/search?query={encoded}",
+                headers=headers,
+                timeout=5
+            )
+            soup = BeautifulSoup(res.text, "html.parser")
 
-        # ===== fallback =====
+            for p in soup.select("h2")[:2]:
+                results.append(f"📱 Dcard: {p.text.strip()}")
+                links.append("https://www.dcard.tw")
+        except Exception as e:
+            print("Dcard error:", e)
+
+        # fallback
         if not results:
             results.append(f"{keyword} 市場趨勢")
-
-        return "\n".join(results)
+            links.append(f"https://www.google.com/search?q={encoded}")
 
     except Exception as e:
-        logger.error(f"Market intel error: {e}")
-        return "市場資料取得失敗"
+        print("fetch error:", e)
+        results = ["市場資料錯誤"]
+        links = []
+
+    # 👇 關鍵：永遠回傳兩個
+    return results, links
 
 # ===== Notebook儲存 =====
 def save_to_notebook(chat_id, content):
