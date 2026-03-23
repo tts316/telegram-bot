@@ -1,3 +1,11 @@
+# ===== 成效追蹤 =====
+campaign_logs = []   # 存每次文案
+
+# 模擬成效資料（之後可換 DB）
+campaign_performance = {
+    # "campaign_id": {"click": 10, "lead": 3}
+}
+
 import os
 import logging
 import feedparser
@@ -148,92 +156,76 @@ def save_to_notebook(chat_id, content):
         logger.error(f"Notebook error: {e}")
 
 # ===== AI文案生成 =====
+import uuid
+import datetime
+
 def generate_marketing(chat_id):
     try:
-        # ===== 1. 安全取得市場資料 =====
+        # ===== 1. 市場資料 =====
         try:
             market_data, links = fetch_market_intel(chat_id)
         except Exception as e:
-            print("🔥 fetch_market_intel error:", e)
-            market_data = ["AI轉職需求持續成長", "企業導入AI人才需求增加"]
+            print("fetch error:", e)
+            market_data = ["AI轉職需求增加"]
             links = []
 
-        # ===== 2. 防呆（避免 unpack / 型別錯誤）=====
         if not isinstance(market_data, list):
             market_data = ["市場資料異常"]
 
-        if not isinstance(links, list):
-            links = []
-
-        # ===== 3. 降載（避免 token 過多 / timeout）=====
         market_text = "\n".join(market_data)[:500]
 
-        # ===== 4. Prompt =====
+        # ===== 2. 建立 campaign =====
+        campaign_id = str(uuid.uuid4())[:8]
+        topic = user_topics.get(chat_id, "AI行銷")
+        keyword = user_keywords.get(chat_id, "AI課程")
+
+        tracking_link = f"https://yourdomain.com/?cid={campaign_id}&kw={keyword}"
+
+        # ===== 3. Prompt =====
         prompt = f"""
 {MARKETING_PROMPT}
 
-以下為最新市場資訊：
+市場資訊：
 {market_text}
 
-請產出更貼近台灣市場、具轉換力的內容。
+請產出「高轉換招生文案」
+並加入強烈CTA（立即報名 / 免費諮詢）
 """
 
-        # ===== 5. 呼叫 OpenAI（加強穩定性）=====
+        # ===== 4. OpenAI =====
         try:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                timeout=45  # ⬅️ 比原本更保守
+                timeout=45
             )
-
             result = response.choices[0].message.content
 
         except Exception as e:
-            print("🔥 OpenAI error:", e)
+            print("OpenAI error:", e)
+            result = "🔥 AI轉職正夯！立即卡位未來 → 免費諮詢中"
 
-            # fallback：避免整個壞掉
-            result = f"""
-【AI文案（備援模式）】
+        # ===== 5. 加入 tracking =====
+        result += f"\n\n👉 立即諮詢：{tracking_link}"
 
-🔥 AI轉職正夯！
-現在不學AI，你將被市場淘汰！
+        # ===== 6. 記錄 campaign =====
+        campaign_logs.append({
+            "campaign_id": campaign_id,
+            "chat_id": chat_id,
+            "topic": topic,
+            "keyword": keyword,
+            "content": result,
+            "date": datetime.datetime.now().isoformat()
+        })
 
-📌 熱門技能：
-✔ ChatGPT應用
-✔ 自動化工具
-✔ AI行銷
-
-👉 立即卡位未來職場
-👉 免費諮詢名額開放中
-
-⚠️（系統暫時使用備援文案）
-"""
-
-        # ===== 6. 加上來源（安全處理）=====
-        if links:
-            try:
-                clean_links = []
-                for l in links:
-                    if isinstance(l, str):
-                        clean_links.append(l.split("?")[0])
-
-                if clean_links:
-                    result += "\n\n📎 市場資料來源：\n" + "\n".join(clean_links[:3])
-
-            except Exception as e:
-                print("link format error:", e)
+        # 初始化成效
+        campaign_performance[campaign_id] = {"click": 0, "lead": 0}
 
         return result
 
     except Exception as e:
-        print("🔥 generate_marketing fatal error:", e)
-
-        return """
-⚠️ 系統暫時忙碌
-
-請稍後再試 /marketing
-（系統已進入保護模式）
-"""
+        print("generate error:", e)
+        return "⚠️ 系統忙碌"
 
 # ===== 指令 =====
 
