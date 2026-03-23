@@ -150,33 +150,90 @@ def save_to_notebook(chat_id, content):
 # ===== AI文案生成 =====
 def generate_marketing(chat_id):
     try:
-        market_data, links = fetch_market_intel(chat_id)
+        # ===== 1. 安全取得市場資料 =====
+        try:
+            market_data, links = fetch_market_intel(chat_id)
+        except Exception as e:
+            print("🔥 fetch_market_intel error:", e)
+            market_data = ["AI轉職需求持續成長", "企業導入AI人才需求增加"]
+            links = []
 
-        market_text = "\n".join(market_data)[:1000]
+        # ===== 2. 防呆（避免 unpack / 型別錯誤）=====
+        if not isinstance(market_data, list):
+            market_data = ["市場資料異常"]
 
+        if not isinstance(links, list):
+            links = []
+
+        # ===== 3. 降載（避免 token 過多 / timeout）=====
+        market_text = "\n".join(market_data)[:500]
+
+        # ===== 4. Prompt =====
         prompt = f"""
 {MARKETING_PROMPT}
 
+以下為最新市場資訊：
 {market_text}
+
+請產出更貼近台灣市場、具轉換力的內容。
 """
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            timeout=60
-        )
+        # ===== 5. 呼叫 OpenAI（加強穩定性）=====
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                timeout=45  # ⬅️ 比原本更保守
+            )
 
-        result = response.choices[0].message.content
+            result = response.choices[0].message.content
 
+        except Exception as e:
+            print("🔥 OpenAI error:", e)
+
+            # fallback：避免整個壞掉
+            result = f"""
+【AI文案（備援模式）】
+
+🔥 AI轉職正夯！
+現在不學AI，你將被市場淘汰！
+
+📌 熱門技能：
+✔ ChatGPT應用
+✔ 自動化工具
+✔ AI行銷
+
+👉 立即卡位未來職場
+👉 免費諮詢名額開放中
+
+⚠️（系統暫時使用備援文案）
+"""
+
+        # ===== 6. 加上來源（安全處理）=====
         if links:
-            clean_links = [l.split("?")[0] for l in links]
-            result += "\n\n📎 市場資料來源：\n" + "\n".join(clean_links)
+            try:
+                clean_links = []
+                for l in links:
+                    if isinstance(l, str):
+                        clean_links.append(l.split("?")[0])
+
+                if clean_links:
+                    result += "\n\n📎 市場資料來源：\n" + "\n".join(clean_links[:3])
+
+            except Exception as e:
+                print("link format error:", e)
 
         return result
 
     except Exception as e:
-        print("🔥 OpenAI ERROR:", e)   # 👈 加這行
-        return f"⚠️ 錯誤：{str(e)}"   # 👈 改這行
+        print("🔥 generate_marketing fatal error:", e)
+
+        return """
+⚠️ 系統暫時忙碌
+
+請稍後再試 /marketing
+（系統已進入保護模式）
+"""
 
 # ===== 指令 =====
 
