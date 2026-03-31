@@ -1,4 +1,11 @@
 import os
+from dotenv import load_dotenv
+
+# ===== 強制載入目前專案根目錄 .env =====
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(BASE_DIR, ".env")
+load_dotenv(dotenv_path=ENV_PATH, override=False)
+
 import logging
 import feedparser
 import urllib.parse
@@ -18,29 +25,43 @@ from telegram.ext import (
 )
 
 from openai import OpenAI
+from gsheet import get_tracking_data
 
 # ===== 環境變數 =====
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+TRACK_BASE_URL = os.getenv("TRACK_BASE_URL", "https://your-domain.com")
+LANDING_PAGE_URL = os.getenv("LANDING_PAGE_URL", "https://your-landing-page.com")
+THANKYOU_PAGE_URL = os.getenv("THANKYOU_PAGE_URL", "https://your-thankyou-page.com")
+
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-5266698491"))
+
 if not TOKEN or not OPENAI_API_KEY:
-    raise ValueError("❌ 缺少必要環境變數")
+    raise ValueError("❌ 缺少必要環境變數：TELEGRAM_BOT_TOKEN / OPENAI_API_KEY")
 
 # ===== 基本設定 =====
 tz = pytz.timezone("Asia/Taipei")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # ===== 使用者設定 =====
 user_keywords = {}
 user_sources = {}
 user_topics = {}
 
-# ===== 成效追蹤 =====
+# ===== 成效追蹤 / 文案記錄 =====
 campaign_logs = []
 campaign_performance = {}
+
 
 # ===== Prompt =====
 MARKETING_PROMPT = """
@@ -57,18 +78,42 @@ MARKETING_PROMPT = """
 5. CTA
 6. 影音腳本
 
-語氣要有「轉職焦慮 + 機會感」
+語氣要有：
+- 轉職焦慮
+- 升級機會感
+- 台灣市場口吻
+- 能提升報名動機
 """
+
 
 # ===== Notebook =====
 def save_to_notebook(chat_id, content):
-    topic = user_topics.get(chat_id, "AI行銷")
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-    filename = f"notebook_{topic}_{today}.txt"
+    try:
+        topic = user_topics.get(chat_id, "AI行銷")
+        today = datetime.datetime.now(tz).strftime("%Y-%m-%d")
+        safe_topic = topic.replace("/", "_").replace("\\", "_").strip() or "AI行銷"
+        filename = f"notebook_{safe_topic}_{today}.txt"
 
-    with open(filename, "a", encoding="utf-8") as f:
-        f.write("\n\n====\n")
-        f.write(content)
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write("\n\n====\n")
+            f.write(content)
+    except Exception as e:
+        logger.exception("save_to_notebook error: %s", e)
+
+
+# ===== 讀取真實追蹤資料 =====
+def load_tracking_data():
+    try:
+        return get_tracking_data()
+    except Exception as e:
+        logger.exception("load_tracking_data error: %s", e)
+        return {}
+
+
+def get_campaign_performance(campaign_id):
+    data = load_tracking_data()
+    return data.get(campaign_id, {"click": 0, "lead": 0})
+
 
 # ===== 市場資料 =====
 def fetch_market_intel(chat_id):
@@ -77,24 +122,29 @@ def fetch_market_intel(chat_id):
 
     try:
         keyword = user_keywords.get(chat_id, "台灣 AI 培訓")
-        source = user_sources.get(chat_id, ""
+        source = user_sources.get(chat_id, "")
 
-)
-        query = f"{keyword} {source}"
+        query = f"{keyword} {source}".strip()
         encoded = urllib.parse.quote(query)
-
         headers = {"User-Agent": "Mozilla/5.0"}
 
         # Google News
         try:
-            news_url = f"https://news.google.com/rss/search?q={encoded}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+            news_url = (
+                f"https://news.google.com/rss/search?q={encoded}"
+                f"&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+            )
             feed = feedparser.parse(news_url)
 
-            for entry in feed.entries[:2]:
-                results.append(f"📰 {entry.title}")
-                links.append(entry.link)
+            for entry in getattr(feed, "entries", [])[:2]:
+                title = getattr(entry, "title", "").strip()
+                link = getattr(entry, "link", "").strip()
+                if title:
+                    results.append(f"📰 {title}")
+                if link:
+                    links.append(link)
         except Exception as e:
-            print("news error:", e)
+            logger.warning("Google News error: %s", e)
 
         # PTT
         try:
@@ -106,10 +156,14 @@ def fetch_market_intel(chat_id):
             soup = BeautifulSoup(res.text, "html.parser")
 
             for t in soup.select(".title a")[:2]:
-                results.append(f"💬 PTT: {t.text.strip()}")
-                links.append("https://www.ptt.cc" + t.get("href"))
+                title = t.text.strip()
+                href = t.get("href")
+                if title:
+                    results.append(f"💬 PTT: {title}")
+                if href:
+                    links.append("https://www.ptt.cc" + href)
         except Exception as e:
-            print("ptt error:", e)
+            logger.warning("PTT error: %s", e)
 
         # Dcard
         try:
@@ -120,34 +174,58 @@ def fetch_market_intel(chat_id):
             )
             soup = BeautifulSoup(res.text, "html.parser")
 
-            for p in soup.select("h2")[:2]:
-                results.append(f"📱 Dcard: {p.text.strip()}")
-                links.append("https://www.dcard.tw")
+            count = 0
+            for p in soup.select("h2"):
+                title = p.text.strip()
+                if title:
+                    results.append(f"📱 Dcard: {title}")
+                    links.append("https://www.dcard.tw/search?query=" + encoded)
+                    count += 1
+                if count >= 2:
+                    break
         except Exception as e:
-            print("dcard error:", e)
+            logger.warning("Dcard error: %s", e)
 
         if not results:
             results.append(f"{keyword} 市場趨勢")
             links.append(f"https://www.google.com/search?q={encoded}")
 
     except Exception as e:
-        print("fetch error:", e)
+        logger.exception("fetch_market_intel error: %s", e)
         results = ["市場資料錯誤"]
         links = []
 
     return results, links
 
+
 # ===== 文案生成 =====
 def generate_marketing(chat_id):
     try:
         market_data, links = fetch_market_intel(chat_id)
+
+        if not isinstance(market_data, list):
+            market_data = ["市場資料異常"]
+        if not isinstance(links, list):
+            links = []
+
         market_text = "\n".join(market_data)[:500]
 
         campaign_id = str(uuid.uuid4())[:8]
         topic = user_topics.get(chat_id, "AI行銷")
         keyword = user_keywords.get(chat_id, "AI課程")
 
-        tracking_link = f"https://yourdomain.com/?cid={campaign_id}&kw={keyword}"
+        tracking_link = (
+            f"{TRACK_BASE_URL}/track"
+            f"?cid={campaign_id}"
+            f"&action=click"
+            f"&target={urllib.parse.quote(LANDING_PAGE_URL, safe='')}"
+        )
+
+        lead_link = (
+            f"{TRACK_BASE_URL}/lead"
+            f"?cid={campaign_id}"
+            f"&target={urllib.parse.quote(THANKYOU_PAGE_URL, safe='')}"
+        )
 
         prompt = f"""
 {MARKETING_PROMPT}
@@ -155,163 +233,324 @@ def generate_marketing(chat_id):
 市場資訊：
 {market_text}
 
-請產出高轉換招生文案
+請產出高轉換招生文案，必須包含：
+1. Facebook 廣告文案
+2. 招生主文案
+3. LINE 短文
+4. 強力 CTA
+5. 影音腳本
 """
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            timeout=45
-        )
+        try:
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=45
+            )
+            result = response.choices[0].message.content
+        except Exception as e:
+            logger.exception("OpenAI generate error: %s", e)
+            result = (
+                "【AI文案（備援模式）】\n\n"
+                "🔥 AI轉職正夯！\n"
+                "現在不升級技能，你可能被市場淘汰！\n\n"
+                "📌 熱門技能：\n"
+                "✔ ChatGPT應用\n"
+                "✔ 自動化工具\n"
+                "✔ AI行銷\n\n"
+                "👉 立即卡位未來職場\n"
+                "👉 免費諮詢名額開放中"
+            )
 
-        result = response.choices[0].message.content
-
-        # ✅ tracking link
         result += f"\n\n👉 立即諮詢：{tracking_link}"
+        result += f"\n📝 表單送出測試（lead）：{lead_link}"
 
-        # ✅ 資料來源
         if links:
-            clean_links = [l.split("?")[0] for l in links if isinstance(l, str)]
-            result += "\n\n📎 市場資料來源：\n" + "\n".join(clean_links[:3])
+            try:
+                clean_links = [l.split("?")[0] for l in links if isinstance(l, str)]
+                if clean_links:
+                    result += "\n\n📎 市場資料來源：\n" + "\n".join(clean_links[:3])
+            except Exception as e:
+                logger.warning("link format error: %s", e)
 
-        # ✅ 記錄
         campaign_logs.append({
             "campaign_id": campaign_id,
             "chat_id": chat_id,
             "topic": topic,
+            "keyword": keyword,
             "content": result,
-            "date": datetime.datetime.now()
+            "date": datetime.datetime.now(tz)
         })
 
-        campaign_performance[campaign_id] = {"click": 0, "lead": 0}
+        if campaign_id not in campaign_performance:
+            campaign_performance[campaign_id] = {"click": 0, "lead": 0}
 
         return result
 
     except Exception as e:
-        print("generate error:", e)
-        return "⚠️ 系統忙碌"
+        logger.exception("generate_marketing fatal error: %s", e)
+        return "⚠️ 系統暫時忙碌，請稍後再試"
 
-# ===== 成效更新 =====
+
+# ===== 測試用模擬成效 =====
 def update_campaign_performance(campaign_id, click=0, lead=0):
     if campaign_id in campaign_performance:
         campaign_performance[campaign_id]["click"] += click
         campaign_performance[campaign_id]["lead"] += lead
 
-# ===== 優化 =====
+
+# ===== 文案優化 =====
 def optimize_marketing(chat_id):
-    recent = [c for c in campaign_logs if c["chat_id"] == chat_id][-2:]
-    if len(recent) < 2:
-        return "⚠️ 至少需要2筆文案"
+    try:
+        recent = [c for c in campaign_logs if c["chat_id"] == chat_id][-2:]
 
-    c1, c2 = recent
+        if len(recent) < 2:
+            return "⚠️ 至少需要先產生 2 筆文案，再執行 /optimize"
 
-    p1 = campaign_performance.get(c1["campaign_id"], {})
-    p2 = campaign_performance.get(c2["campaign_id"], {})
+        c1, c2 = recent
+        p1 = get_campaign_performance(c1["campaign_id"])
+        p2 = get_campaign_performance(c2["campaign_id"])
 
-    prompt = f"""
-文案A：
+        prompt = f"""
+你是台灣招生行銷優化專家
+
+以下是兩則文案：
+
+【文案A】
 {c1['content']}
-成效：點擊 {p1.get('click',0)} 留單 {p1.get('lead',0)}
 
-文案B：
+成效：
+- 點擊：{p1.get('click', 0)}
+- 留單：{p1.get('lead', 0)}
+
+【文案B】
 {c2['content']}
-成效：點擊 {p2.get('click',0)} 留單 {p2.get('lead',0)}
 
-請分析並產出更強版本
+成效：
+- 點擊：{p2.get('click', 0)}
+- 留單：{p2.get('lead', 0)}
+
+請完成：
+1. 分析哪一篇表現較好
+2. 說明原因
+3. 產出一篇更高轉換率的優化版文案
+4. 提供更強 CTA
 """
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        timeout=45
-    )
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=45
+        )
 
-    return response.choices[0].message.content
+        return response.choices[0].message.content
 
-# ===== 報表 =====
+    except Exception as e:
+        logger.exception("optimize_marketing error: %s", e)
+        return "⚠️ 優化失敗"
+
+
+# ===== Dashboard / 報表 =====
 def generate_report(chat_id):
-    user_campaigns = [c for c in campaign_logs if c["chat_id"] == chat_id]
-    if not user_campaigns:
-        return "⚠️ 無資料"
+    try:
+        data = load_tracking_data()
+        user_campaigns = [c for c in campaign_logs if c["chat_id"] == chat_id]
 
-    total_click = 0
-    total_lead = 0
+        if not user_campaigns:
+            return "⚠️ 目前沒有文案資料"
 
-    for c in user_campaigns:
-        perf = campaign_performance.get(c["campaign_id"], {})
-        total_click += perf.get("click", 0)
-        total_lead += perf.get("lead", 0)
+        total_click = 0
+        total_lead = 0
 
-    return f"""
-📊 成效報表
+        best = None
+        best_rate = 0
+        best_click = 0
+        best_lead = 0
 
-總文案數：{len(user_campaigns)}
-總點擊：{total_click}
-總留單：{total_lead}
-轉換率：{(total_lead / total_click * 100) if total_click else 0:.1f}%
-"""
+        report_lines = []
+
+        for c in user_campaigns:
+            perf = data.get(c["campaign_id"], {"click": 0, "lead": 0})
+
+            click = int(perf.get("click", 0) or 0)
+            lead = int(perf.get("lead", 0) or 0)
+
+            total_click += click
+            total_lead += lead
+
+            rate = (lead / click) if click else 0
+
+            report_lines.append(
+                f"• {c['campaign_id']} | 點擊 {click} / 留單 {lead} / 轉換 {rate * 100:.1f}%"
+            )
+
+            if rate > best_rate:
+                best_rate = rate
+                best = c
+                best_click = click
+                best_lead = lead
+
+        avg_rate = (total_lead / total_click * 100) if total_click else 0
+
+        return f"""
+📊 AI行銷 Dashboard
+
+📌 總文案數：{len(user_campaigns)}
+📈 總點擊：{total_click}
+💰 總留單：{total_lead}
+🎯 平均轉換率：{avg_rate:.1f}%
+
+🏆 最佳文案 Campaign：
+{best['campaign_id'] if best else "無"}
+
+🔥 最佳文案成效：
+點擊 {best_click} / 留單 {best_lead} / 轉換率 {best_rate * 100:.1f}%
+
+📝 最近成效：
+{chr(10).join(report_lines[-5:])}
+""".strip()
+
+    except Exception as e:
+        logger.exception("generate_report error: %s", e)
+        return "⚠️ 報表產生失敗"
+
 
 # ===== Telegram 指令 =====
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ OpenClaw AI 行銷系統已啟動")
+
+
 async def marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     msg = generate_marketing(chat_id)
     save_to_notebook(chat_id, msg)
+
     await update.message.reply_text(msg)
+
+    try:
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=f"📢 手動產生文案同步\n\n來源 chat_id：{chat_id}\n\n{msg}"
+        )
+    except Exception as e:
+        logger.warning("group send error (marketing): %s", e)
+
 
 async def optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    await update.message.reply_text(optimize_marketing(chat_id))
+    msg = optimize_marketing(chat_id)
+    await update.message.reply_text(msg)
+
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    await update.message.reply_text(generate_report(chat_id))
+    msg = generate_report(chat_id)
+    await update.message.reply_text(msg)
+
 
 async def simulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if campaign_logs:
         cid = campaign_logs[-1]["campaign_id"]
         update_campaign_performance(cid, click=20, lead=5)
-        await update.message.reply_text(f"✅ 模擬成效已更新 {cid}")
+        await update.message.reply_text(
+            f"🧪 測試模式：已模擬 campaign {cid} 成效\n"
+            f"點擊 +20 / 留單 +5\n"
+            f"（正式環境請改用真實 tracking link）"
+        )
+    else:
+        await update.message.reply_text("⚠️ 尚無 campaign 可模擬")
+
 
 async def setkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_keywords[update.effective_chat.id] = " ".join(context.args)
-    await update.message.reply_text("✅ keyword 設定完成")
+    value = " ".join(context.args).strip()
+    if not value:
+        await update.message.reply_text("⚠️ 用法：/setkeyword 關鍵字")
+        return
+
+    user_keywords[update.effective_chat.id] = value
+    await update.message.reply_text(f"✅ keyword 設定完成：{value}")
+
 
 async def setsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_sources[update.effective_chat.id] = " ".join(context.args)
-    await update.message.reply_text("✅ source 設定完成")
+    value = " ".join(context.args).strip()
+    if not value:
+        await update.message.reply_text("⚠️ 用法：/setsource 來源")
+        return
+
+    user_sources[update.effective_chat.id] = value
+    await update.message.reply_text(f"✅ source 設定完成：{value}")
+
 
 async def settopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_topics[update.effective_chat.id] = " ".join(context.args)
-    await update.message.reply_text("✅ topic 設定完成")
+    value = " ".join(context.args).strip()
+    if not value:
+        await update.message.reply_text("⚠️ 用法：/settopic 主題")
+        return
+
+    user_topics[update.effective_chat.id] = value
+    await update.message.reply_text(f"✅ topic 設定完成：{value}")
+
 
 async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    hour, minute = map(int, context.args[0].split(":"))
+    try:
+        chat_id = update.effective_chat.id
 
-    context.job_queue.run_daily(
-        daily_push,
-        time=time(hour=hour, minute=minute, tzinfo=tz),
-        chat_id=chat_id,
-        name=str(chat_id)
-    )
+        if not context.args:
+            await update.message.reply_text("⚠️ 用法：/settime 09:30")
+            return
 
-    await update.message.reply_text("✅ 推播設定完成")
+        hour, minute = map(int, context.args[0].split(":"))
+
+        current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
+        for job in current_jobs:
+            job.schedule_removal()
+
+        context.job_queue.run_daily(
+            daily_push,
+            time=time(hour=hour, minute=minute, tzinfo=tz),
+            chat_id=chat_id,
+            name=str(chat_id)
+        )
+
+        await update.message.reply_text(f"✅ 推播設定完成：每天 {hour:02d}:{minute:02d}")
+
+    except Exception as e:
+        logger.exception("settime error: %s", e)
+        await update.message.reply_text("⚠️ 時間格式錯誤，請用 /settime 09:30")
+
 
 # ===== 每日推播 =====
 async def daily_push(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.chat_id
-    msg = generate_marketing(chat_id)
-    save_to_notebook(chat_id, msg)
+    try:
+        chat_id = context.job.chat_id
+        msg = generate_marketing(chat_id)
+        save_to_notebook(chat_id, msg)
 
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="📢 每日AI文案\n\n" + msg
-    )
+        personal_text = "📢 每日AI文案\n\n" + msg
+        group_text = f"📢 每日AI文案（同步群組）\n\n來源 chat_id：{chat_id}\n\n{msg}"
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=personal_text
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=group_text
+            )
+        except Exception as e:
+            logger.warning("group send error (daily_push): %s", e)
+
+    except Exception as e:
+        logger.exception("daily_push error: %s", e)
+
 
 # ===== 主程式 =====
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("marketing", marketing))
     app.add_handler(CommandHandler("optimize", optimize))
     app.add_handler(CommandHandler("report", report))
@@ -322,13 +561,19 @@ def main():
     app.add_handler(CommandHandler("settime", settime))
 
     if TARGET_CHAT_ID:
-        app.job_queue.run_daily(
-            daily_push,
-            time=time(hour=9, minute=0, tzinfo=tz),
-            chat_id=int(TARGET_CHAT_ID),
-        )
+        try:
+            app.job_queue.run_daily(
+                daily_push,
+                time=time(hour=9, minute=0, tzinfo=tz),
+                chat_id=int(TARGET_CHAT_ID),
+                name=str(TARGET_CHAT_ID)
+            )
+            logger.info("Default daily push scheduled for TARGET_CHAT_ID=%s", TARGET_CHAT_ID)
+        except Exception as e:
+            logger.exception("Default schedule error: %s", e)
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
