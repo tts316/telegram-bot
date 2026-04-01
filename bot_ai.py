@@ -7,6 +7,7 @@ ENV_PATH = os.path.join(BASE_DIR, ".env")
 load_dotenv(dotenv_path=ENV_PATH, override=False)
 
 import logging
+import json
 import feedparser
 import urllib.parse
 import pytz
@@ -39,6 +40,8 @@ LANDING_PAGE_URL = os.getenv("LANDING_PAGE_URL", "https://your-landing-page.com"
 THANKYOU_PAGE_URL = os.getenv("THANKYOU_PAGE_URL", "https://your-thankyou-page.com")
 
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-5266698491"))
+GROUP_CONFIG_FILE = os.path.join(BASE_DIR, "group_config.json")
+ALLOWED_REPORT_TYPES = ["marketing", "report", "optimize", "daily_push"]
 
 if not TOKEN or not OPENAI_API_KEY:
     raise ValueError("❌ 缺少必要環境變數：TELEGRAM_BOT_TOKEN / OPENAI_API_KEY")
@@ -99,6 +102,42 @@ def save_to_notebook(chat_id, content):
             f.write(content)
     except Exception as e:
         logger.exception("save_to_notebook error: %s", e)
+
+
+# ===== 群組路由設定 =====
+def load_group_config():
+    try:
+        with open(GROUP_CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {k: int(v) for k, v in data.items()}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning("load_group_config error: %s", e)
+        return {}
+
+
+def save_group_config(data):
+    with open(GROUP_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_report_group(report_type):
+    config = load_group_config()
+    return config.get(report_type, GROUP_CHAT_ID)
+
+
+async def send_to_report_group(bot, report_type, text):
+    group_id = get_report_group(report_type)
+    if not group_id:
+        return False
+
+    try:
+        await bot.send_message(chat_id=group_id, text=text)
+        return True
+    except Exception as e:
+        logger.warning("send_to_report_group error (%s): %s", report_type, e)
+        return False
 
 
 # ===== 讀取真實追蹤資料 =====
@@ -428,9 +467,10 @@ async def marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
     try:
-        await context.bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text=f"📢 手動產生文案同步\n\n來源 chat_id：{chat_id}\n\n{msg}"
+        await send_to_report_group(
+            context.bot,
+            "marketing",
+            f"📢 手動產生文案同步\n\n來源 chat_id：{chat_id}\n\n{msg}"
         )
     except Exception as e:
         logger.warning("group send error (marketing): %s", e)
@@ -441,11 +481,29 @@ async def optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = optimize_marketing(chat_id)
     await update.message.reply_text(msg)
 
+    try:
+        await send_to_report_group(
+            context.bot,
+            "optimize",
+            f"🤖 文案優化同步\n\n來源 chat_id：{chat_id}\n\n{msg}"
+        )
+    except Exception as e:
+        logger.warning("group send error (optimize): %s", e)
+
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     msg = generate_report(chat_id)
     await update.message.reply_text(msg)
+
+    try:
+        await send_to_report_group(
+            context.bot,
+            "report",
+            f"📊 成效報表同步\n\n來源 chat_id：{chat_id}\n\n{msg}"
+        )
+    except Exception as e:
+        logger.warning("group send error (report): %s", e)
 
 
 async def simulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -519,6 +577,69 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ 時間格式錯誤，請用 /settime 09:30")
 
 
+async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "⚠️ 用法：/setgroup 報告類型 群組ID\n例如：/setgroup marketing -5266698491"
+            )
+            return
+
+        report_type = context.args[0].strip().lower()
+        if report_type not in ALLOWED_REPORT_TYPES:
+            await update.message.reply_text(
+                "⚠️ 報告類型錯誤，可用類型：marketing / report / optimize / daily_push"
+            )
+            return
+
+        group_id = int(context.args[1].strip())
+        config = load_group_config()
+        config[report_type] = group_id
+        save_group_config(config)
+
+        await update.message.reply_text(
+            f"✅ 已設定群組路由\n類型：{report_type}\n群組ID：{group_id}"
+        )
+    except Exception as e:
+        logger.exception("setgroup error: %s", e)
+        await update.message.reply_text("⚠️ 設定失敗，請確認群組ID格式正確")
+
+
+async def showgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config = load_group_config()
+    lines = ["📋 目前群組路由設定："]
+
+    for report_type in ALLOWED_REPORT_TYPES:
+        group_id = config.get(report_type, GROUP_CHAT_ID)
+        source = "自訂" if report_type in config else "預設"
+        lines.append(f"- {report_type} → {group_id}（{source}）")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def delgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not context.args:
+            await update.message.reply_text("⚠️ 用法：/delgroup 報告類型")
+            return
+
+        report_type = context.args[0].strip().lower()
+        config = load_group_config()
+
+        if report_type not in config:
+            await update.message.reply_text(
+                f"⚠️ {report_type} 尚未設定自訂群組，現在使用預設 GROUP_CHAT_ID"
+            )
+            return
+
+        del config[report_type]
+        save_group_config(config)
+        await update.message.reply_text(f"✅ 已刪除 {report_type} 的群組路由設定")
+    except Exception as e:
+        logger.exception("delgroup error: %s", e)
+        await update.message.reply_text("⚠️ 刪除失敗")
+
+
 # ===== 每日推播 =====
 async def daily_push(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -535,9 +656,10 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE):
         )
 
         try:
-            await context.bot.send_message(
-                chat_id=GROUP_CHAT_ID,
-                text=group_text
+            await send_to_report_group(
+                context.bot,
+                "daily_push",
+                group_text
             )
         except Exception as e:
             logger.warning("group send error (daily_push): %s", e)
@@ -559,6 +681,9 @@ def main():
     app.add_handler(CommandHandler("setsource", setsource))
     app.add_handler(CommandHandler("settopic", settopic))
     app.add_handler(CommandHandler("settime", settime))
+    app.add_handler(CommandHandler("setgroup", setgroup))
+    app.add_handler(CommandHandler("showgroups", showgroups))
+    app.add_handler(CommandHandler("delgroup", delgroup))
 
     if TARGET_CHAT_ID:
         try:
