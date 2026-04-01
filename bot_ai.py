@@ -41,6 +41,7 @@ THANKYOU_PAGE_URL = os.getenv("THANKYOU_PAGE_URL", "https://your-thankyou-page.c
 
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-5266698491"))
 GROUP_CONFIG_FILE = os.path.join(BASE_DIR, "group_config.json")
+SCHEDULE_CONFIG_FILE = os.path.join(BASE_DIR, "schedule_config.json")
 ALLOWED_REPORT_TYPES = ["marketing", "report", "optimize", "daily_push"]
 
 if not TOKEN or not OPENAI_API_KEY:
@@ -120,6 +121,54 @@ def load_group_config():
 def save_group_config(data):
     with open(GROUP_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_schedule_config():
+    try:
+        with open(SCHEDULE_CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {
+                schedule_name: {
+                    "chat_id": int(item["chat_id"]),
+                    "hour": int(item["hour"]),
+                    "minute": int(item["minute"]),
+                    "group_id": int(item["group_id"]),
+                }
+                for schedule_name, item in data.items()
+            }
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning("load_schedule_config error: %s", e)
+        return {}
+
+
+def save_schedule_config(data):
+    with open(SCHEDULE_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def build_schedule_job_name(chat_id, schedule_name):
+    return f"schedule:{chat_id}:{schedule_name}"
+
+
+def schedule_daily_job(job_queue, schedule_name, chat_id, hour, minute, group_id):
+    job_name = build_schedule_job_name(chat_id, schedule_name)
+
+    current_jobs = job_queue.get_jobs_by_name(job_name)
+    for job in current_jobs:
+        job.schedule_removal()
+
+    job_queue.run_daily(
+        scheduled_daily_push,
+        time=time(hour=hour, minute=minute, tzinfo=tz),
+        chat_id=chat_id,
+        name=job_name,
+        data={
+            "schedule_name": schedule_name,
+            "group_id": group_id,
+        },
+    )
 
 
 def get_report_group(report_type):
@@ -577,6 +626,95 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ 時間格式錯誤，請用 /settime 09:30")
 
 
+async def setschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if len(context.args) < 3:
+            await update.message.reply_text(
+                "⚠️ 用法：/setschedule 排程名稱 HH:MM 群組ID\n例如：/setschedule schedule1 09:30 -5266698491"
+            )
+            return
+
+        schedule_name = context.args[0].strip().lower()
+        hour, minute = map(int, context.args[1].strip().split(":"))
+        group_id = int(context.args[2].strip())
+        chat_id = update.effective_chat.id
+
+        config = load_schedule_config()
+        config[schedule_name] = {
+            "chat_id": chat_id,
+            "hour": hour,
+            "minute": minute,
+            "group_id": group_id,
+        }
+        save_schedule_config(config)
+
+        schedule_daily_job(
+            context.job_queue,
+            schedule_name=schedule_name,
+            chat_id=chat_id,
+            hour=hour,
+            minute=minute,
+            group_id=group_id,
+        )
+
+        await update.message.reply_text(
+            f"✅ 已建立排程\n名稱：{schedule_name}\n時間：{hour:02d}:{minute:02d}\n群組ID：{group_id}"
+        )
+    except Exception as e:
+        logger.exception("setschedule error: %s", e)
+        await update.message.reply_text("⚠️ 設定失敗，請確認時間與群組ID格式正確")
+
+
+async def showschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config = load_schedule_config()
+    chat_id = update.effective_chat.id
+
+    lines = ["🗓️ 目前排程設定："]
+    has_item = False
+
+    for schedule_name, item in sorted(config.items()):
+        if item.get("chat_id") != chat_id:
+            continue
+        has_item = True
+        lines.append(
+            f"- {schedule_name} → {item['hour']:02d}:{item['minute']:02d} / 群組 {item['group_id']}"
+        )
+
+    if not has_item:
+        lines.append("- 尚未設定任何自訂排程")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def delschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not context.args:
+            await update.message.reply_text("⚠️ 用法：/delschedule 排程名稱")
+            return
+
+        schedule_name = context.args[0].strip().lower()
+        chat_id = update.effective_chat.id
+        config = load_schedule_config()
+        item = config.get(schedule_name)
+
+        if not item or int(item.get("chat_id", 0)) != chat_id:
+            await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+            return
+
+        del config[schedule_name]
+        save_schedule_config(config)
+
+        job_name = build_schedule_job_name(chat_id, schedule_name)
+        current_jobs = context.job_queue.get_jobs_by_name(job_name)
+        for job in current_jobs:
+            job.schedule_removal()
+
+        await update.message.reply_text(f"✅ 已刪除排程：{schedule_name}")
+    except Exception as e:
+        logger.exception("delschedule error: %s", e)
+        await update.message.reply_text("⚠️ 刪除排程失敗")
+
+
 async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if len(context.args) < 2:
@@ -668,6 +806,35 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("daily_push error: %s", e)
 
 
+async def scheduled_daily_push(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = context.job.chat_id
+        schedule_name = context.job.data.get("schedule_name", "schedule")
+        group_id = int(context.job.data.get("group_id", GROUP_CHAT_ID))
+
+        msg = generate_marketing(chat_id)
+        save_to_notebook(chat_id, msg)
+
+        personal_text = f"📢 排程AI文案：{schedule_name}\n\n" + msg
+        group_text = (
+            f"📢 排程AI文案同步：{schedule_name}\n\n"
+            f"來源 chat_id：{chat_id}\n"
+            f"目標群組：{group_id}\n\n{msg}"
+        )
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=personal_text
+        )
+
+        await context.bot.send_message(
+            chat_id=group_id,
+            text=group_text
+        )
+    except Exception as e:
+        logger.exception("scheduled_daily_push error: %s", e)
+
+
 # ===== 主程式 =====
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -681,6 +848,9 @@ def main():
     app.add_handler(CommandHandler("setsource", setsource))
     app.add_handler(CommandHandler("settopic", settopic))
     app.add_handler(CommandHandler("settime", settime))
+    app.add_handler(CommandHandler("setschedule", setschedule))
+    app.add_handler(CommandHandler("showschedules", showschedules))
+    app.add_handler(CommandHandler("delschedule", delschedule))
     app.add_handler(CommandHandler("setgroup", setgroup))
     app.add_handler(CommandHandler("showgroups", showgroups))
     app.add_handler(CommandHandler("delgroup", delgroup))
@@ -696,6 +866,28 @@ def main():
             logger.info("Default daily push scheduled for TARGET_CHAT_ID=%s", TARGET_CHAT_ID)
         except Exception as e:
             logger.exception("Default schedule error: %s", e)
+
+    schedule_config = load_schedule_config()
+    for schedule_name, item in schedule_config.items():
+        try:
+            schedule_daily_job(
+                app.job_queue,
+                schedule_name=schedule_name,
+                chat_id=item["chat_id"],
+                hour=item["hour"],
+                minute=item["minute"],
+                group_id=item["group_id"],
+            )
+            logger.info(
+                "Loaded custom schedule %s for chat_id=%s at %02d:%02d -> group %s",
+                schedule_name,
+                item["chat_id"],
+                item["hour"],
+                item["minute"],
+                item["group_id"],
+            )
+        except Exception as e:
+            logger.exception("Load custom schedule error (%s): %s", schedule_name, e)
 
     app.run_polling()
 
