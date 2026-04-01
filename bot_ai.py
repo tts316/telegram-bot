@@ -133,6 +133,7 @@ def load_schedule_config():
                     "hour": int(item["hour"]),
                     "minute": int(item["minute"]),
                     "group_id": int(item["group_id"]),
+                    "task_prompt": str(item.get("task_prompt", "")).strip(),
                 }
                 for schedule_name, item in data.items()
             }
@@ -152,7 +153,7 @@ def build_schedule_job_name(chat_id, schedule_name):
     return f"schedule:{chat_id}:{schedule_name}"
 
 
-def schedule_daily_job(job_queue, schedule_name, chat_id, hour, minute, group_id):
+def schedule_daily_job(job_queue, schedule_name, chat_id, hour, minute, group_id, task_prompt=""):
     job_name = build_schedule_job_name(chat_id, schedule_name)
 
     current_jobs = job_queue.get_jobs_by_name(job_name)
@@ -167,6 +168,7 @@ def schedule_daily_job(job_queue, schedule_name, chat_id, hour, minute, group_id
         data={
             "schedule_name": schedule_name,
             "group_id": group_id,
+            "task_prompt": task_prompt,
         },
     )
 
@@ -204,15 +206,12 @@ def get_campaign_performance(campaign_id):
 
 
 # ===== 市場資料 =====
-def fetch_market_intel(chat_id):
+def fetch_market_intel_by_query(query):
     results = []
     links = []
 
     try:
-        keyword = user_keywords.get(chat_id, "台灣 AI 培訓")
-        source = user_sources.get(chat_id, "")
-
-        query = f"{keyword} {source}".strip()
+        query = query.strip() or "台灣 AI 培訓"
         encoded = urllib.parse.quote(query)
         headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -279,11 +278,18 @@ def fetch_market_intel(chat_id):
             links.append(f"https://www.google.com/search?q={encoded}")
 
     except Exception as e:
-        logger.exception("fetch_market_intel error: %s", e)
+        logger.exception("fetch_market_intel_by_query error: %s", e)
         results = ["市場資料錯誤"]
         links = []
 
     return results, links
+
+
+def fetch_market_intel(chat_id):
+    keyword = user_keywords.get(chat_id, "台灣 AI 培訓")
+    source = user_sources.get(chat_id, "")
+    query = f"{keyword} {source}".strip()
+    return fetch_market_intel_by_query(query)
 
 
 # ===== 文案生成 =====
@@ -503,6 +509,50 @@ def generate_report(chat_id):
         return "⚠️ 報表產生失敗"
 
 
+def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
+    try:
+        query_text = task_prompt[:120].strip() or user_keywords.get(chat_id, "台灣 AI 培訓")
+        market_data, links = fetch_market_intel_by_query(query_text)
+        market_text = "\n".join(market_data[:6]) if market_data else "目前沒有額外市場資料"
+
+        prompt = f"""
+你是台灣教育招生與競品分析助理。
+
+現在要執行的排程名稱：{schedule_name}
+
+任務要求：
+{task_prompt}
+
+可參考的最新市場資料：
+{market_text}
+
+請依照任務要求直接輸出可發送到 Telegram 的完整內容。
+如果任務要求中有比較、熱度、建議、清單、表格，請整理成容易閱讀的區塊或表格樣式。
+若資訊不足，請明確標註「待人工確認」而不要編造。
+"""
+
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=45
+        )
+        result = response.choices[0].message.content
+
+        if links:
+            clean_links = [link.split("?")[0] for link in links if isinstance(link, str)]
+            if clean_links:
+                result += "\n\n📎 參考資料：\n" + "\n".join(clean_links[:5])
+
+        return result
+    except Exception as e:
+        logger.exception("generate_custom_schedule_task error: %s", e)
+        return (
+            f"⚠️ 排程任務 {schedule_name} 產生失敗\n\n"
+            f"任務內容：{task_prompt}\n\n"
+            "請稍後重試或調整任務描述。"
+        )
+
+
 # ===== Telegram 指令 =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ OpenClaw AI 行銷系統已啟動")
@@ -640,11 +690,15 @@ async def setschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
 
         config = load_schedule_config()
+        existing_task_prompt = ""
+        if schedule_name in config and int(config[schedule_name].get("chat_id", 0)) == chat_id:
+            existing_task_prompt = config[schedule_name].get("task_prompt", "")
         config[schedule_name] = {
             "chat_id": chat_id,
             "hour": hour,
             "minute": minute,
             "group_id": group_id,
+            "task_prompt": existing_task_prompt,
         }
         save_schedule_config(config)
 
@@ -655,6 +709,7 @@ async def setschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
             hour=hour,
             minute=minute,
             group_id=group_id,
+            task_prompt=existing_task_prompt,
         )
 
         await update.message.reply_text(
@@ -676,8 +731,9 @@ async def showschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if item.get("chat_id") != chat_id:
             continue
         has_item = True
+        task_status = "已設任務" if item.get("task_prompt") else "預設文案"
         lines.append(
-            f"- {schedule_name} → {item['hour']:02d}:{item['minute']:02d} / 群組 {item['group_id']}"
+            f"- {schedule_name} → {item['hour']:02d}:{item['minute']:02d} / 群組 {item['group_id']} / {task_status}"
         )
 
     if not has_item:
@@ -713,6 +769,49 @@ async def delschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("delschedule error: %s", e)
         await update.message.reply_text("⚠️ 刪除排程失敗")
+
+
+async def setscheduletask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "⚠️ 用法：/setscheduletask 排程名稱 任務內容"
+            )
+            return
+
+        schedule_name = context.args[0].strip().lower()
+        task_prompt = " ".join(context.args[1:]).strip()
+        chat_id = update.effective_chat.id
+        config = load_schedule_config()
+        item = config.get(schedule_name)
+
+        if not item or int(item.get("chat_id", 0)) != chat_id:
+            await update.message.reply_text(
+                f"⚠️ 找不到排程：{schedule_name}，請先用 /setschedule 建立"
+            )
+            return
+
+        item["task_prompt"] = task_prompt
+        config[schedule_name] = item
+        save_schedule_config(config)
+
+        schedule_daily_job(
+            context.job_queue,
+            schedule_name=schedule_name,
+            chat_id=item["chat_id"],
+            hour=item["hour"],
+            minute=item["minute"],
+            group_id=item["group_id"],
+            task_prompt=task_prompt,
+        )
+
+        preview = task_prompt[:80] + ("..." if len(task_prompt) > 80 else "")
+        await update.message.reply_text(
+            f"✅ 已設定排程任務內容\n名稱：{schedule_name}\n內容摘要：{preview}"
+        )
+    except Exception as e:
+        logger.exception("setscheduletask error: %s", e)
+        await update.message.reply_text("⚠️ 設定排程任務失敗")
 
 
 async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -811,8 +910,12 @@ async def scheduled_daily_push(context: ContextTypes.DEFAULT_TYPE):
         chat_id = context.job.chat_id
         schedule_name = context.job.data.get("schedule_name", "schedule")
         group_id = int(context.job.data.get("group_id", GROUP_CHAT_ID))
+        task_prompt = str(context.job.data.get("task_prompt", "")).strip()
 
-        msg = generate_marketing(chat_id)
+        if task_prompt:
+            msg = generate_custom_schedule_task(chat_id, schedule_name, task_prompt)
+        else:
+            msg = generate_marketing(chat_id)
         save_to_notebook(chat_id, msg)
 
         personal_text = f"📢 排程AI文案：{schedule_name}\n\n" + msg
@@ -849,6 +952,7 @@ def main():
     app.add_handler(CommandHandler("settopic", settopic))
     app.add_handler(CommandHandler("settime", settime))
     app.add_handler(CommandHandler("setschedule", setschedule))
+    app.add_handler(CommandHandler("setscheduletask", setscheduletask))
     app.add_handler(CommandHandler("showschedules", showschedules))
     app.add_handler(CommandHandler("delschedule", delschedule))
     app.add_handler(CommandHandler("setgroup", setgroup))
@@ -877,6 +981,7 @@ def main():
                 hour=item["hour"],
                 minute=item["minute"],
                 group_id=item["group_id"],
+                task_prompt=item.get("task_prompt", ""),
             )
             logger.info(
                 "Loaded custom schedule %s for chat_id=%s at %02d:%02d -> group %s",
