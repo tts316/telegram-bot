@@ -8,6 +8,7 @@ load_dotenv(dotenv_path=ENV_PATH, override=False)
 
 import logging
 import json
+import secrets
 import feedparser
 import urllib.parse
 import pytz
@@ -42,7 +43,19 @@ THANKYOU_PAGE_URL = os.getenv("THANKYOU_PAGE_URL", "https://your-thankyou-page.c
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-5266698491"))
 GROUP_CONFIG_FILE = os.path.join(BASE_DIR, "group_config.json")
 SCHEDULE_CONFIG_FILE = os.path.join(BASE_DIR, "schedule_config.json")
+AUTHORIZED_USERS_FILE = os.path.join(BASE_DIR, "authorized_users.json")
+PAIR_CODES_FILE = os.path.join(BASE_DIR, "pending_pair_codes.json")
 ALLOWED_REPORT_TYPES = ["marketing", "report", "optimize", "daily_push"]
+ADMIN_USER_IDS = {
+    int(value.strip())
+    for value in os.getenv("ADMIN_USER_IDS", "").split(",")
+    if value.strip()
+}
+if TARGET_CHAT_ID:
+    try:
+        ADMIN_USER_IDS.add(int(TARGET_CHAT_ID))
+    except ValueError:
+        pass
 
 if not TOKEN or not OPENAI_API_KEY:
     raise ValueError("❌ 缺少必要環境變數：TELEGRAM_BOT_TOKEN / OPENAI_API_KEY")
@@ -121,6 +134,95 @@ def load_group_config():
 def save_group_config(data):
     with open(GROUP_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_authorized_users():
+    try:
+        with open(AUTHORIZED_USERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {
+                "admins": [int(user_id) for user_id in data.get("admins", [])],
+                "operators": [int(user_id) for user_id in data.get("operators", [])],
+            }
+    except FileNotFoundError:
+        default_admins = sorted(ADMIN_USER_IDS)
+        return {"admins": default_admins, "operators": default_admins.copy()}
+    except Exception as e:
+        logger.warning("load_authorized_users error: %s", e)
+        default_admins = sorted(ADMIN_USER_IDS)
+        return {"admins": default_admins, "operators": default_admins.copy()}
+
+
+def save_authorized_users(data):
+    normalized = {
+        "admins": sorted({int(user_id) for user_id in data.get("admins", [])}),
+        "operators": sorted({int(user_id) for user_id in data.get("operators", [])}),
+    }
+    with open(AUTHORIZED_USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(normalized, f, ensure_ascii=False, indent=2)
+
+
+def load_pair_codes():
+    try:
+        with open(PAIR_CODES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning("load_pair_codes error: %s", e)
+        return {}
+
+
+def save_pair_codes(data):
+    with open(PAIR_CODES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def is_admin(user_id):
+    auth = load_authorized_users()
+    return int(user_id) in set(auth.get("admins", []))
+
+
+def is_operator(user_id):
+    auth = load_authorized_users()
+    operators = set(auth.get("operators", [])) | set(auth.get("admins", []))
+    return int(user_id) in operators
+
+
+def ensure_default_admins():
+    auth = load_authorized_users()
+    changed = False
+
+    for admin_id in sorted(ADMIN_USER_IDS):
+        if admin_id not in auth["admins"]:
+            auth["admins"].append(admin_id)
+            changed = True
+        if admin_id not in auth["operators"]:
+            auth["operators"].append(admin_id)
+            changed = True
+
+    if changed:
+        save_authorized_users(auth)
+
+
+async def require_operator(update: Update):
+    user = update.effective_user
+    if user and is_operator(user.id):
+        return True
+
+    await update.message.reply_text(
+        "⛔ 你尚未被授權操作排程或群組設定。\n請先私訊 bot 輸入 /start 取得配對碼，再請管理者核准。"
+    )
+    return False
+
+
+async def require_admin(update: Update):
+    user = update.effective_user
+    if user and is_admin(user.id):
+        return True
+
+    await update.message.reply_text("⛔ 只有管理者可以執行這個指令。")
+    return False
 
 
 def load_schedule_config():
@@ -274,7 +376,7 @@ def fetch_market_intel_by_query(query):
             logger.warning("Dcard error: %s", e)
 
         if not results:
-            results.append(f"{keyword} 市場趨勢")
+            results.append(f"{query} 市場趨勢")
             links.append(f"https://www.google.com/search?q={encoded}")
 
     except Exception as e:
@@ -553,12 +655,154 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
         )
 
 
+def format_schedule_detail(schedule_name, item):
+    task_prompt = item.get("task_prompt", "").strip()
+    task_preview = task_prompt if task_prompt else "未設定，將使用預設 AI 文案流程"
+    return (
+        f"📌 排程詳細資料\n"
+        f"名稱：{schedule_name}\n"
+        f"時間：{item['hour']:02d}:{item['minute']:02d}\n"
+        f"群組ID：{item['group_id']}\n"
+        f"建立者 chat_id：{item['chat_id']}\n"
+        f"任務內容：\n{task_preview}"
+    )
+
+
 # ===== Telegram 指令 =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ OpenClaw AI 行銷系統已啟動")
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("⚠️ 無法辨識目前使用者")
+        return
+
+    ensure_default_admins()
+
+    if is_operator(user.id):
+        role = "管理者" if is_admin(user.id) else "已授權操作員"
+        await update.message.reply_text(
+            f"✅ OpenClaw AI 行銷系統已啟動\n你的身份：{role}\n你可以直接使用排程與群組管理指令。"
+        )
+        return
+
+    pair_codes = load_pair_codes()
+    existing_code = None
+    for code, item in pair_codes.items():
+        if int(item.get("user_id", 0)) == int(user.id):
+            existing_code = code
+            break
+
+    if not existing_code:
+        existing_code = secrets.token_hex(3).upper()
+        pair_codes[existing_code] = {
+            "user_id": int(user.id),
+            "username": user.username or "",
+            "full_name": user.full_name or "",
+            "created_at": datetime.datetime.now(tz).isoformat(),
+        }
+        save_pair_codes(pair_codes)
+
+    await update.message.reply_text(
+        "🔐 你尚未被授權。\n"
+        f"你的配對碼：{existing_code}\n"
+        "請將這組配對碼提供給管理者，由管理者執行 /approveuser 配對碼 開通權限。"
+    )
+
+
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("⚠️ 無法辨識目前使用者")
+        return
+
+    role = "管理者" if is_admin(user.id) else "已授權操作員" if is_operator(user.id) else "未授權"
+    await update.message.reply_text(
+        f"🙋 使用者資訊\n"
+        f"user_id：{user.id}\n"
+        f"username：@{user.username or '無'}\n"
+        f"姓名：{user.full_name}\n"
+        f"狀態：{role}"
+    )
+
+
+async def approveuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/approveuser 配對碼")
+        return
+
+    pair_code = context.args[0].strip().upper()
+    pair_codes = load_pair_codes()
+    item = pair_codes.get(pair_code)
+
+    if not item:
+        await update.message.reply_text(f"⚠️ 找不到配對碼：{pair_code}")
+        return
+
+    auth = load_authorized_users()
+    user_id = int(item["user_id"])
+    if user_id not in auth["operators"]:
+        auth["operators"].append(user_id)
+    save_authorized_users(auth)
+
+    del pair_codes[pair_code]
+    save_pair_codes(pair_codes)
+
+    await update.message.reply_text(
+        f"✅ 已授權使用者\nuser_id：{user_id}\n名稱：{item.get('full_name') or '未知'}"
+    )
+
+
+async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+
+    auth = load_authorized_users()
+    admin_ids = sorted(set(auth.get("admins", [])))
+    operator_ids = sorted(set(auth.get("operators", [])))
+
+    lines = ["👥 已授權使用者："]
+    lines.append("管理者：" + (", ".join(str(user_id) for user_id in admin_ids) or "無"))
+    lines.append("操作員：" + (", ".join(str(user_id) for user_id in operator_ids) or "無"))
+    await update.message.reply_text("\n".join(lines))
+
+
+async def revokeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/revokeuser user_id")
+        return
+
+    try:
+        user_id = int(context.args[0].strip())
+    except ValueError:
+        await update.message.reply_text("⚠️ user_id 格式錯誤")
+        return
+
+    if user_id in ADMIN_USER_IDS:
+        await update.message.reply_text("⚠️ 不能移除預設管理者")
+        return
+
+    auth = load_authorized_users()
+    before_count = len(auth.get("operators", []))
+    auth["operators"] = [item for item in auth.get("operators", []) if int(item) != user_id]
+    auth["admins"] = [item for item in auth.get("admins", []) if int(item) != user_id]
+    save_authorized_users(auth)
+
+    if len(auth["operators"]) == before_count:
+        await update.message.reply_text(f"⚠️ user_id {user_id} 不在授權名單中")
+        return
+
+    await update.message.reply_text(f"✅ 已移除 user_id {user_id} 的操作權限")
 
 
 async def marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     chat_id = update.effective_chat.id
     msg = generate_marketing(chat_id)
     save_to_notebook(chat_id, msg)
@@ -576,6 +820,9 @@ async def marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     chat_id = update.effective_chat.id
     msg = optimize_marketing(chat_id)
     await update.message.reply_text(msg)
@@ -591,6 +838,9 @@ async def optimize(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     chat_id = update.effective_chat.id
     msg = generate_report(chat_id)
     await update.message.reply_text(msg)
@@ -606,6 +856,9 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def simulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     if campaign_logs:
         cid = campaign_logs[-1]["campaign_id"]
         update_campaign_performance(cid, click=20, lead=5)
@@ -619,6 +872,9 @@ async def simulate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     value = " ".join(context.args).strip()
     if not value:
         await update.message.reply_text("⚠️ 用法：/setkeyword 關鍵字")
@@ -629,6 +885,9 @@ async def setkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     value = " ".join(context.args).strip()
     if not value:
         await update.message.reply_text("⚠️ 用法：/setsource 來源")
@@ -639,6 +898,9 @@ async def setsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     value = " ".join(context.args).strip()
     if not value:
         await update.message.reply_text("⚠️ 用法：/settopic 主題")
@@ -649,6 +911,9 @@ async def settopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     try:
         chat_id = update.effective_chat.id
 
@@ -677,6 +942,9 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     try:
         if len(context.args) < 3:
             await update.message.reply_text(
@@ -721,6 +989,9 @@ async def setschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def showschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     config = load_schedule_config()
     chat_id = update.effective_chat.id
 
@@ -743,6 +1014,9 @@ async def showschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     try:
         if not context.args:
             await update.message.reply_text("⚠️ 用法：/delschedule 排程名稱")
@@ -772,6 +1046,9 @@ async def delschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setscheduletask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     try:
         if len(context.args) < 2:
             await update.message.reply_text(
@@ -814,7 +1091,120 @@ async def setscheduletask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ 設定排程任務失敗")
 
 
+async def viewschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/viewschedule 排程名稱")
+        return
+
+    schedule_name = context.args[0].strip().lower()
+    chat_id = update.effective_chat.id
+    config = load_schedule_config()
+    item = config.get(schedule_name)
+
+    if not item or int(item.get("chat_id", 0)) != chat_id:
+        await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+        return
+
+    await update.message.reply_text(format_schedule_detail(schedule_name, item))
+
+
+async def updateschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    try:
+        if len(context.args) < 3:
+            await update.message.reply_text(
+                "⚠️ 用法：/updateschedule 排程名稱 HH:MM 群組ID"
+            )
+            return
+
+        schedule_name = context.args[0].strip().lower()
+        hour, minute = map(int, context.args[1].strip().split(":"))
+        group_id = int(context.args[2].strip())
+        chat_id = update.effective_chat.id
+        config = load_schedule_config()
+        item = config.get(schedule_name)
+
+        if not item or int(item.get("chat_id", 0)) != chat_id:
+            await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+            return
+
+        item["hour"] = hour
+        item["minute"] = minute
+        item["group_id"] = group_id
+        config[schedule_name] = item
+        save_schedule_config(config)
+
+        schedule_daily_job(
+            context.job_queue,
+            schedule_name=schedule_name,
+            chat_id=item["chat_id"],
+            hour=hour,
+            minute=minute,
+            group_id=group_id,
+            task_prompt=item.get("task_prompt", ""),
+        )
+
+        await update.message.reply_text(
+            f"✅ 已更新排程\n名稱：{schedule_name}\n時間：{hour:02d}:{minute:02d}\n群組ID：{group_id}"
+        )
+    except Exception as e:
+        logger.exception("updateschedule error: %s", e)
+        await update.message.reply_text("⚠️ 更新排程失敗，請確認時間與群組ID格式正確")
+
+
+async def runschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/runschedule 排程名稱")
+        return
+
+    schedule_name = context.args[0].strip().lower()
+    chat_id = update.effective_chat.id
+    config = load_schedule_config()
+    item = config.get(schedule_name)
+
+    if not item or int(item.get("chat_id", 0)) != chat_id:
+        await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+        return
+
+    await update.message.reply_text(f"🧪 正在手動執行排程：{schedule_name}")
+
+    class ManualJob:
+        def __init__(self, job_chat_id, data):
+            self.chat_id = job_chat_id
+            self.data = data
+
+    manual_context = type(
+        "ManualScheduleContext",
+        (),
+        {
+            "bot": context.bot,
+            "job": ManualJob(
+                item["chat_id"],
+                {
+                    "schedule_name": schedule_name,
+                    "group_id": item["group_id"],
+                    "task_prompt": item.get("task_prompt", ""),
+                },
+            ),
+        },
+    )()
+
+    await scheduled_daily_push(manual_context)
+    await update.message.reply_text(f"✅ 已手動執行排程：{schedule_name}")
+
+
 async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     try:
         if len(context.args) < 2:
             await update.message.reply_text(
@@ -843,6 +1233,9 @@ async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def showgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     config = load_group_config()
     lines = ["📋 目前群組路由設定："]
 
@@ -855,6 +1248,9 @@ async def showgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
     try:
         if not context.args:
             await update.message.reply_text("⚠️ 用法：/delgroup 報告類型")
@@ -940,9 +1336,14 @@ async def scheduled_daily_push(context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 主程式 =====
 def main():
+    ensure_default_admins()
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("whoami", whoami))
+    app.add_handler(CommandHandler("approveuser", approveuser))
+    app.add_handler(CommandHandler("listusers", listusers))
+    app.add_handler(CommandHandler("revokeuser", revokeuser))
     app.add_handler(CommandHandler("marketing", marketing))
     app.add_handler(CommandHandler("optimize", optimize))
     app.add_handler(CommandHandler("report", report))
@@ -954,6 +1355,9 @@ def main():
     app.add_handler(CommandHandler("setschedule", setschedule))
     app.add_handler(CommandHandler("setscheduletask", setscheduletask))
     app.add_handler(CommandHandler("showschedules", showschedules))
+    app.add_handler(CommandHandler("viewschedule", viewschedule))
+    app.add_handler(CommandHandler("updateschedule", updateschedule))
+    app.add_handler(CommandHandler("runschedule", runschedule))
     app.add_handler(CommandHandler("delschedule", delschedule))
     app.add_handler(CommandHandler("setgroup", setgroup))
     app.add_handler(CommandHandler("showgroups", showgroups))
