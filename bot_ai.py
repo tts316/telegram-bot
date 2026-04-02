@@ -41,10 +41,16 @@ LANDING_PAGE_URL = os.getenv("LANDING_PAGE_URL", "https://your-landing-page.com"
 THANKYOU_PAGE_URL = os.getenv("THANKYOU_PAGE_URL", "https://your-thankyou-page.com")
 
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-5266698491"))
-GROUP_CONFIG_FILE = os.path.join(BASE_DIR, "group_config.json")
-SCHEDULE_CONFIG_FILE = os.path.join(BASE_DIR, "schedule_config.json")
-AUTHORIZED_USERS_FILE = os.path.join(BASE_DIR, "authorized_users.json")
-PAIR_CODES_FILE = os.path.join(BASE_DIR, "pending_pair_codes.json")
+DATA_DIR = os.getenv("BOT_DATA_DIR", BASE_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
+GROUP_CONFIG_FILE = os.path.join(DATA_DIR, "group_config.json")
+SCHEDULE_CONFIG_FILE = os.path.join(DATA_DIR, "schedule_config.json")
+AUTHORIZED_USERS_FILE = os.path.join(DATA_DIR, "authorized_users.json")
+PAIR_CODES_FILE = os.path.join(DATA_DIR, "pending_pair_codes.json")
+LEGACY_GROUP_CONFIG_FILE = os.path.join(BASE_DIR, "group_config.json")
+LEGACY_SCHEDULE_CONFIG_FILE = os.path.join(BASE_DIR, "schedule_config.json")
+LEGACY_AUTHORIZED_USERS_FILE = os.path.join(BASE_DIR, "authorized_users.json")
+LEGACY_PAIR_CODES_FILE = os.path.join(BASE_DIR, "pending_pair_codes.json")
 ALLOWED_REPORT_TYPES = ["marketing", "report", "optimize", "daily_push"]
 ADMIN_USER_IDS = {
     int(value.strip())
@@ -119,34 +125,63 @@ def save_to_notebook(chat_id, content):
 
 
 # ===== 群組路由設定 =====
+def load_json_with_fallback(primary_path, fallback_path, default_value):
+    for path in [primary_path, fallback_path]:
+        if not path:
+            continue
+
+        if not os.path.exists(path):
+            continue
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if path != primary_path:
+                save_json(primary_path, data)
+
+            return data
+        except Exception as e:
+            logger.warning("load_json_with_fallback error (%s): %s", path, e)
+
+    return default_value
+
+
+def save_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def load_group_config():
     try:
-        with open(GROUP_CONFIG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return {k: int(v) for k, v in data.items()}
-    except FileNotFoundError:
-        return {}
+        data = load_json_with_fallback(
+            GROUP_CONFIG_FILE,
+            LEGACY_GROUP_CONFIG_FILE if GROUP_CONFIG_FILE != LEGACY_GROUP_CONFIG_FILE else None,
+            {},
+        )
+        return {k: int(v) for k, v in data.items()}
     except Exception as e:
         logger.warning("load_group_config error: %s", e)
         return {}
 
 
 def save_group_config(data):
-    with open(GROUP_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    save_json(GROUP_CONFIG_FILE, data)
 
 
 def load_authorized_users():
     try:
-        with open(AUTHORIZED_USERS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return {
-                "admins": [int(user_id) for user_id in data.get("admins", [])],
-                "operators": [int(user_id) for user_id in data.get("operators", [])],
-            }
-    except FileNotFoundError:
         default_admins = sorted(ADMIN_USER_IDS)
-        return {"admins": default_admins, "operators": default_admins.copy()}
+        data = load_json_with_fallback(
+            AUTHORIZED_USERS_FILE,
+            LEGACY_AUTHORIZED_USERS_FILE if AUTHORIZED_USERS_FILE != LEGACY_AUTHORIZED_USERS_FILE else None,
+            {"admins": default_admins, "operators": default_admins.copy()},
+        )
+        return {
+            "admins": [int(user_id) for user_id in data.get("admins", [])],
+            "operators": [int(user_id) for user_id in data.get("operators", [])],
+        }
     except Exception as e:
         logger.warning("load_authorized_users error: %s", e)
         default_admins = sorted(ADMIN_USER_IDS)
@@ -158,24 +193,23 @@ def save_authorized_users(data):
         "admins": sorted({int(user_id) for user_id in data.get("admins", [])}),
         "operators": sorted({int(user_id) for user_id in data.get("operators", [])}),
     }
-    with open(AUTHORIZED_USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(normalized, f, ensure_ascii=False, indent=2)
+    save_json(AUTHORIZED_USERS_FILE, normalized)
 
 
 def load_pair_codes():
     try:
-        with open(PAIR_CODES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+        return load_json_with_fallback(
+            PAIR_CODES_FILE,
+            LEGACY_PAIR_CODES_FILE if PAIR_CODES_FILE != LEGACY_PAIR_CODES_FILE else None,
+            {},
+        )
     except Exception as e:
         logger.warning("load_pair_codes error: %s", e)
         return {}
 
 
 def save_pair_codes(data):
-    with open(PAIR_CODES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    save_json(PAIR_CODES_FILE, data)
 
 
 def is_admin(user_id):
@@ -227,28 +261,28 @@ async def require_admin(update: Update):
 
 def load_schedule_config():
     try:
-        with open(SCHEDULE_CONFIG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return {
-                schedule_name: {
-                    "chat_id": int(item["chat_id"]),
-                    "hour": int(item["hour"]),
-                    "minute": int(item["minute"]),
-                    "group_id": int(item["group_id"]),
-                    "task_prompt": str(item.get("task_prompt", "")).strip(),
-                }
-                for schedule_name, item in data.items()
+        data = load_json_with_fallback(
+            SCHEDULE_CONFIG_FILE,
+            LEGACY_SCHEDULE_CONFIG_FILE if SCHEDULE_CONFIG_FILE != LEGACY_SCHEDULE_CONFIG_FILE else None,
+            {},
+        )
+        return {
+            schedule_name: {
+                "chat_id": int(item["chat_id"]),
+                "hour": int(item["hour"]),
+                "minute": int(item["minute"]),
+                "group_id": int(item["group_id"]),
+                "task_prompt": str(item.get("task_prompt", "")).strip(),
             }
-    except FileNotFoundError:
-        return {}
+            for schedule_name, item in data.items()
+        }
     except Exception as e:
         logger.warning("load_schedule_config error: %s", e)
         return {}
 
 
 def save_schedule_config(data):
-    with open(SCHEDULE_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    save_json(SCHEDULE_CONFIG_FILE, data)
 
 
 def build_schedule_job_name(chat_id, schedule_name):
@@ -799,6 +833,38 @@ async def revokeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 已移除 user_id {user_id} 的操作權限")
 
 
+async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/addadmin user_id")
+        return
+
+    try:
+        user_id = int(context.args[0].strip())
+    except ValueError:
+        await update.message.reply_text("⚠️ user_id 格式錯誤")
+        return
+
+    auth = load_authorized_users()
+    if user_id not in auth["admins"]:
+        auth["admins"].append(user_id)
+    if user_id not in auth["operators"]:
+        auth["operators"].append(user_id)
+    save_authorized_users(auth)
+
+    await update.message.reply_text(f"✅ 已新增管理者 user_id：{user_id}")
+
+
+async def deleteallpairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+
+    save_pair_codes({})
+    await update.message.reply_text("✅ 已清空所有待核准配對碼")
+
+
 async def marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_operator(update):
         return
@@ -1201,6 +1267,35 @@ async def runschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 已手動執行排程：{schedule_name}")
 
 
+async def exportschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    config = load_schedule_config()
+    chat_id = update.effective_chat.id
+    matched = [
+        (schedule_name, item)
+        for schedule_name, item in sorted(config.items())
+        if int(item.get("chat_id", 0)) == chat_id
+    ]
+
+    if not matched:
+        await update.message.reply_text("📤 目前沒有可匯出的排程設定")
+        return
+
+    lines = ["📤 排程設定摘要匯出："]
+    for schedule_name, item in matched:
+        task_prompt = item.get("task_prompt", "").strip()
+        task_preview = task_prompt[:60] + ("..." if len(task_prompt) > 60 else "")
+        if not task_preview:
+            task_preview = "未設定，使用預設 AI 文案流程"
+        lines.append(
+            f"- {schedule_name} | {item['hour']:02d}:{item['minute']:02d} | 群組 {item['group_id']} | {task_preview}"
+        )
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_operator(update):
         return
@@ -1344,6 +1439,8 @@ def main():
     app.add_handler(CommandHandler("approveuser", approveuser))
     app.add_handler(CommandHandler("listusers", listusers))
     app.add_handler(CommandHandler("revokeuser", revokeuser))
+    app.add_handler(CommandHandler("addadmin", addadmin))
+    app.add_handler(CommandHandler("deleteallpairs", deleteallpairs))
     app.add_handler(CommandHandler("marketing", marketing))
     app.add_handler(CommandHandler("optimize", optimize))
     app.add_handler(CommandHandler("report", report))
@@ -1358,6 +1455,7 @@ def main():
     app.add_handler(CommandHandler("viewschedule", viewschedule))
     app.add_handler(CommandHandler("updateschedule", updateschedule))
     app.add_handler(CommandHandler("runschedule", runschedule))
+    app.add_handler(CommandHandler("exportschedules", exportschedules))
     app.add_handler(CommandHandler("delschedule", delschedule))
     app.add_handler(CommandHandler("setgroup", setgroup))
     app.add_handler(CommandHandler("showgroups", showgroups))
