@@ -341,6 +341,22 @@ def get_campaign_performance(campaign_id):
     return data.get(campaign_id, {"click": 0, "lead": 0})
 
 
+def dedupe_links(links):
+    ordered = []
+    seen = set()
+
+    for link in links:
+        if not isinstance(link, str):
+            continue
+        cleaned = link.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        ordered.append(cleaned)
+
+    return ordered
+
+
 # ===== 市場資料 =====
 def fetch_market_intel_by_query(query):
     results = []
@@ -396,16 +412,19 @@ def fetch_market_intel_by_query(query):
                 timeout=5
             )
             soup = BeautifulSoup(res.text, "html.parser")
+            dcard_search_url = "https://www.dcard.tw/search?query=" + encoded
 
             count = 0
             for p in soup.select("h2"):
                 title = p.text.strip()
                 if title:
                     results.append(f"📱 Dcard: {title}")
-                    links.append("https://www.dcard.tw/search?query=" + encoded)
                     count += 1
                 if count >= 2:
                     break
+
+            if count > 0:
+                links.append(dcard_search_url)
         except Exception as e:
             logger.warning("Dcard error: %s", e)
 
@@ -497,7 +516,7 @@ def generate_marketing(chat_id):
 
         if links:
             try:
-                clean_links = [l.split("?")[0] for l in links if isinstance(l, str)]
+                clean_links = dedupe_links(links)
                 if clean_links:
                     result += "\n\n📎 市場資料來源：\n" + "\n".join(clean_links[:3])
             except Exception as e:
@@ -675,7 +694,7 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
         result = response.choices[0].message.content
 
         if links:
-            clean_links = [link.split("?")[0] for link in links if isinstance(link, str)]
+            clean_links = dedupe_links(links)
             if clean_links:
                 result += "\n\n📎 參考資料：\n" + "\n".join(clean_links[:5])
 
@@ -1116,14 +1135,17 @@ async def setscheduletask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        if len(context.args) < 2:
+        raw_text = (update.message.text or "").strip()
+        parts = raw_text.split(None, 2)
+
+        if len(parts) < 3:
             await update.message.reply_text(
                 "⚠️ 用法：/setscheduletask 排程名稱 任務內容"
             )
             return
 
-        schedule_name = context.args[0].strip().lower()
-        task_prompt = " ".join(context.args[1:]).strip()
+        schedule_name = parts[1].strip().lower()
+        task_prompt = parts[2].rstrip()
         chat_id = update.effective_chat.id
         config = load_schedule_config()
         item = config.get(schedule_name)
