@@ -721,6 +721,45 @@ def format_schedule_detail(schedule_name, item):
     )
 
 
+def get_schedule_for_chat(chat_id, schedule_name):
+    config = load_schedule_config()
+    item = config.get(schedule_name)
+    if not item or int(item.get("chat_id", 0)) != chat_id:
+        return config, None
+    return config, item
+
+
+async def apply_schedule_task(update: Update, context: ContextTypes.DEFAULT_TYPE, schedule_name: str, task_prompt: str):
+    chat_id = update.effective_chat.id
+    config, item = get_schedule_for_chat(chat_id, schedule_name)
+
+    if not item:
+        await update.message.reply_text(
+            f"⚠️ 找不到排程：{schedule_name}，請先用 /setschedule 建立"
+        )
+        return
+
+    task_prompt = task_prompt.rstrip()
+    item["task_prompt"] = task_prompt
+    config[schedule_name] = item
+    save_schedule_config(config)
+
+    schedule_daily_job(
+        context.job_queue,
+        schedule_name=schedule_name,
+        chat_id=item["chat_id"],
+        hour=item["hour"],
+        minute=item["minute"],
+        group_id=item["group_id"],
+        task_prompt=task_prompt,
+    )
+
+    preview = task_prompt[:80] + ("..." if len(task_prompt) > 80 else "")
+    await update.message.reply_text(
+        f"✅ 已設定排程任務內容\n名稱：{schedule_name}\n內容摘要：{preview}"
+    )
+
+
 # ===== Telegram 指令 =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1146,37 +1185,75 @@ async def setscheduletask(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         schedule_name = parts[1].strip().lower()
         task_prompt = parts[2].rstrip()
-        chat_id = update.effective_chat.id
-        config = load_schedule_config()
-        item = config.get(schedule_name)
-
-        if not item or int(item.get("chat_id", 0)) != chat_id:
-            await update.message.reply_text(
-                f"⚠️ 找不到排程：{schedule_name}，請先用 /setschedule 建立"
-            )
-            return
-
-        item["task_prompt"] = task_prompt
-        config[schedule_name] = item
-        save_schedule_config(config)
-
-        schedule_daily_job(
-            context.job_queue,
-            schedule_name=schedule_name,
-            chat_id=item["chat_id"],
-            hour=item["hour"],
-            minute=item["minute"],
-            group_id=item["group_id"],
-            task_prompt=task_prompt,
-        )
-
-        preview = task_prompt[:80] + ("..." if len(task_prompt) > 80 else "")
-        await update.message.reply_text(
-            f"✅ 已設定排程任務內容\n名稱：{schedule_name}\n內容摘要：{preview}"
-        )
+        await apply_schedule_task(update, context, schedule_name, task_prompt)
     except Exception as e:
         logger.exception("setscheduletask error: %s", e)
         await update.message.reply_text("⚠️ 設定排程任務失敗")
+
+
+async def setscheduletaskedit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "⚠️ 用法：先輸入 /setscheduletaskedit 排程名稱，再回覆一則多行文字訊息"
+            )
+            return
+
+        if not update.message.reply_to_message or not update.message.reply_to_message.text:
+            await update.message.reply_text(
+                "⚠️ 請回覆一則多行文字訊息，再輸入 /setscheduletaskedit 排程名稱"
+            )
+            return
+
+        schedule_name = context.args[0].strip().lower()
+        task_prompt = update.message.reply_to_message.text.rstrip()
+        await apply_schedule_task(update, context, schedule_name, task_prompt)
+    except Exception as e:
+        logger.exception("setscheduletaskedit error: %s", e)
+        await update.message.reply_text("⚠️ 設定排程任務失敗")
+
+
+async def setscheduletaskfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "⚠️ 用法：先輸入 /setscheduletaskfile 排程名稱，再回覆一個 .txt 文件或文字檔"
+            )
+            return
+
+        if not update.message.reply_to_message or not update.message.reply_to_message.document:
+            await update.message.reply_text(
+                "⚠️ 請回覆一個文字檔，再輸入 /setscheduletaskfile 排程名稱"
+            )
+            return
+
+        schedule_name = context.args[0].strip().lower()
+        document = update.message.reply_to_message.document
+        file_name = (document.file_name or "").lower()
+        if file_name and not file_name.endswith((".txt", ".md")):
+            await update.message.reply_text("⚠️ 目前僅支援 .txt 或 .md 文字檔")
+            return
+
+        tg_file = await context.bot.get_file(document.file_id)
+        file_bytes = await tg_file.download_as_bytearray()
+        task_prompt = bytes(file_bytes).decode("utf-8").rstrip()
+
+        if not task_prompt:
+            await update.message.reply_text("⚠️ 檔案內容為空，請重新上傳")
+            return
+
+        await apply_schedule_task(update, context, schedule_name, task_prompt)
+    except UnicodeDecodeError:
+        await update.message.reply_text("⚠️ 檔案編碼不是 UTF-8，請改用 UTF-8 文字檔")
+    except Exception as e:
+        logger.exception("setscheduletaskfile error: %s", e)
+        await update.message.reply_text("⚠️ 讀取任務檔案失敗")
 
 
 async def viewschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1473,6 +1550,8 @@ def main():
     app.add_handler(CommandHandler("settime", settime))
     app.add_handler(CommandHandler("setschedule", setschedule))
     app.add_handler(CommandHandler("setscheduletask", setscheduletask))
+    app.add_handler(CommandHandler("setscheduletaskedit", setscheduletaskedit))
+    app.add_handler(CommandHandler("setscheduletaskfile", setscheduletaskfile))
     app.add_handler(CommandHandler("showschedules", showschedules))
     app.add_handler(CommandHandler("viewschedule", viewschedule))
     app.add_handler(CommandHandler("updateschedule", updateschedule))
