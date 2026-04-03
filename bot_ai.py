@@ -47,10 +47,12 @@ GROUP_CONFIG_FILE = os.path.join(DATA_DIR, "group_config.json")
 SCHEDULE_CONFIG_FILE = os.path.join(DATA_DIR, "schedule_config.json")
 AUTHORIZED_USERS_FILE = os.path.join(DATA_DIR, "authorized_users.json")
 PAIR_CODES_FILE = os.path.join(DATA_DIR, "pending_pair_codes.json")
+SCHEDULE_EXECUTION_LOG_FILE = os.path.join(DATA_DIR, "schedule_execution_log.json")
 LEGACY_GROUP_CONFIG_FILE = os.path.join(BASE_DIR, "group_config.json")
 LEGACY_SCHEDULE_CONFIG_FILE = os.path.join(BASE_DIR, "schedule_config.json")
 LEGACY_AUTHORIZED_USERS_FILE = os.path.join(BASE_DIR, "authorized_users.json")
 LEGACY_PAIR_CODES_FILE = os.path.join(BASE_DIR, "pending_pair_codes.json")
+LEGACY_SCHEDULE_EXECUTION_LOG_FILE = os.path.join(BASE_DIR, "schedule_execution_log.json")
 ALLOWED_REPORT_TYPES = ["marketing", "report", "optimize", "daily_push"]
 ADMIN_USER_IDS = {
     int(value.strip())
@@ -212,6 +214,60 @@ def save_pair_codes(data):
     save_json(PAIR_CODES_FILE, data)
 
 
+def load_schedule_execution_log():
+    try:
+        return load_json_with_fallback(
+            SCHEDULE_EXECUTION_LOG_FILE,
+            LEGACY_SCHEDULE_EXECUTION_LOG_FILE if SCHEDULE_EXECUTION_LOG_FILE != LEGACY_SCHEDULE_EXECUTION_LOG_FILE else None,
+            {},
+        )
+    except Exception as e:
+        logger.warning("load_schedule_execution_log error: %s", e)
+        return {}
+
+
+def save_schedule_execution_log(data):
+    save_json(SCHEDULE_EXECUTION_LOG_FILE, data)
+
+
+def get_schedule_execution_entry(schedule_name):
+    log_data = load_schedule_execution_log()
+    return log_data.get(schedule_name, {})
+
+
+def record_schedule_execution(schedule_name, status, trigger_type, detail=""):
+    log_data = load_schedule_execution_log()
+    entry = log_data.get(schedule_name, {})
+    now_iso = datetime.datetime.now(tz).isoformat()
+
+    entry["last_status"] = status
+    entry["last_trigger_type"] = trigger_type
+    entry["last_detail"] = detail
+    entry["last_attempt_at"] = now_iso
+
+    if status == "success":
+        entry["last_success_at"] = now_iso
+        entry["last_success_trigger_type"] = trigger_type
+    else:
+        entry["last_error_at"] = now_iso
+
+    log_data[schedule_name] = entry
+    save_schedule_execution_log(log_data)
+
+
+def has_schedule_run_today(schedule_name):
+    entry = get_schedule_execution_entry(schedule_name)
+    last_success_at = entry.get("last_success_at")
+    if not last_success_at:
+        return False
+
+    try:
+        success_dt = datetime.datetime.fromisoformat(last_success_at)
+        return success_dt.astimezone(tz).date() == datetime.datetime.now(tz).date()
+    except Exception:
+        return False
+
+
 def is_admin(user_id):
     auth = load_authorized_users()
     return int(user_id) in set(auth.get("admins", []))
@@ -305,6 +361,7 @@ def schedule_daily_job(job_queue, schedule_name, chat_id, hour, minute, group_id
             "schedule_name": schedule_name,
             "group_id": group_id,
             "task_prompt": task_prompt,
+            "trigger_type": "scheduled",
         },
     )
 
@@ -711,12 +768,19 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
 def format_schedule_detail(schedule_name, item):
     task_prompt = item.get("task_prompt", "").strip()
     task_preview = task_prompt if task_prompt else "未設定，將使用預設 AI 文案流程"
+    execution_entry = get_schedule_execution_entry(schedule_name)
+    last_success_at = execution_entry.get("last_success_at", "尚無成功紀錄")
+    last_trigger_type = execution_entry.get("last_success_trigger_type", "無")
+    last_status = execution_entry.get("last_status", "尚無紀錄")
     return (
         f"📌 排程詳細資料\n"
         f"名稱：{schedule_name}\n"
         f"時間：{item['hour']:02d}:{item['minute']:02d}\n"
         f"群組ID：{item['group_id']}\n"
         f"建立者 chat_id：{item['chat_id']}\n"
+        f"最近成功執行：{last_success_at}\n"
+        f"最近成功來源：{last_trigger_type}\n"
+        f"最近執行狀態：{last_status}\n"
         f"任務內容：\n{task_preview}"
     )
 
@@ -1357,6 +1421,7 @@ async def runschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "schedule_name": schedule_name,
                     "group_id": item["group_id"],
                     "task_prompt": item.get("task_prompt", ""),
+                    "trigger_type": "manual",
                 },
             ),
         },
@@ -1393,6 +1458,49 @@ async def exportschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await update.message.reply_text("\n".join(lines))
+
+
+def schedule_missed_jobs(job_queue, schedule_config):
+    now = datetime.datetime.now(tz)
+
+    for schedule_name, item in schedule_config.items():
+        try:
+            scheduled_at = now.replace(
+                hour=int(item["hour"]),
+                minute=int(item["minute"]),
+                second=0,
+                microsecond=0,
+            )
+
+            if now < scheduled_at:
+                continue
+
+            if has_schedule_run_today(schedule_name):
+                continue
+
+            catchup_job_name = f"catchup:{item['chat_id']}:{schedule_name}:{now.date().isoformat()}"
+            existing_jobs = job_queue.get_jobs_by_name(catchup_job_name)
+            if existing_jobs:
+                continue
+
+            job_queue.run_once(
+                scheduled_daily_push,
+                when=5,
+                chat_id=item["chat_id"],
+                name=catchup_job_name,
+                data={
+                    "schedule_name": schedule_name,
+                    "group_id": item["group_id"],
+                    "task_prompt": item.get("task_prompt", ""),
+                    "trigger_type": "catchup",
+                },
+            )
+            logger.info(
+                "Scheduled catch-up run for %s at startup because today's run was missed",
+                schedule_name,
+            )
+        except Exception as e:
+            logger.exception("schedule_missed_jobs error (%s): %s", schedule_name, e)
 
 
 async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1495,34 +1603,53 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("daily_push error: %s", e)
 
 
-async def scheduled_daily_push(context: ContextTypes.DEFAULT_TYPE):
+async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prompt="", trigger_type="scheduled"):
     try:
-        chat_id = context.job.chat_id
-        schedule_name = context.job.data.get("schedule_name", "schedule")
-        group_id = int(context.job.data.get("group_id", GROUP_CHAT_ID))
-        task_prompt = str(context.job.data.get("task_prompt", "")).strip()
-
         if task_prompt:
             msg = generate_custom_schedule_task(chat_id, schedule_name, task_prompt)
         else:
             msg = generate_marketing(chat_id)
         save_to_notebook(chat_id, msg)
 
-        personal_text = f"📢 排程AI文案：{schedule_name}\n\n" + msg
+        trigger_label = {
+            "scheduled": "排程AI文案",
+            "manual": "手動測試排程",
+            "catchup": "補跑排程",
+        }.get(trigger_type, "排程AI文案")
+
+        personal_text = f"📢 {trigger_label}：{schedule_name}\n\n" + msg
         group_text = (
-            f"📢 排程AI文案同步：{schedule_name}\n\n"
+            f"📢 {trigger_label}同步：{schedule_name}\n\n"
             f"來源 chat_id：{chat_id}\n"
-            f"目標群組：{group_id}\n\n{msg}"
+            f"目標群組：{group_id}\n"
+            f"執行方式：{trigger_type}\n\n{msg}"
         )
 
-        await context.bot.send_message(
+        await bot.send_message(chat_id=chat_id, text=personal_text)
+        await bot.send_message(chat_id=group_id, text=group_text)
+
+        record_schedule_execution(schedule_name, "success", trigger_type)
+    except Exception as e:
+        logger.exception("execute_schedule_push error (%s): %s", schedule_name, e)
+        record_schedule_execution(schedule_name, "error", trigger_type, str(e))
+        raise
+
+
+async def scheduled_daily_push(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = context.job.chat_id
+        schedule_name = context.job.data.get("schedule_name", "schedule")
+        group_id = int(context.job.data.get("group_id", GROUP_CHAT_ID))
+        task_prompt = str(context.job.data.get("task_prompt", "")).strip()
+        trigger_type = str(context.job.data.get("trigger_type", "scheduled")).strip() or "scheduled"
+
+        await execute_schedule_push(
+            context.bot,
             chat_id=chat_id,
-            text=personal_text
-        )
-
-        await context.bot.send_message(
-            chat_id=group_id,
-            text=group_text
+            schedule_name=schedule_name,
+            group_id=group_id,
+            task_prompt=task_prompt,
+            trigger_type=trigger_type,
         )
     except Exception as e:
         logger.exception("scheduled_daily_push error: %s", e)
@@ -1596,6 +1723,8 @@ def main():
             )
         except Exception as e:
             logger.exception("Load custom schedule error (%s): %s", schedule_name, e)
+
+    schedule_missed_jobs(app.job_queue, schedule_config)
 
     app.run_polling()
 
