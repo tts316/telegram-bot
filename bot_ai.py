@@ -418,6 +418,120 @@ def dedupe_links(links):
     return ordered
 
 
+def resolve_final_url(url, headers=None, timeout=8):
+    if not isinstance(url, str):
+        return ""
+
+    cleaned = url.strip()
+    if not cleaned:
+        return ""
+
+    try:
+        response = requests.get(
+            cleaned,
+            headers=headers or {"User-Agent": "Mozilla/5.0"},
+            timeout=timeout,
+            allow_redirects=True,
+        )
+        final_url = (response.url or "").strip()
+        if final_url:
+            return final_url
+    except Exception as e:
+        logger.warning("resolve_final_url error (%s): %s", cleaned, e)
+
+    return cleaned
+
+
+def extract_schedule_queries(task_prompt, fallback_query):
+    queries = []
+    seen = set()
+
+    for raw_line in task_prompt.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith(("課程名稱", "可以使用以下方式搜尋")):
+            continue
+
+        for prefix in ("- ", "• ", "* "):
+            if line.startswith(prefix):
+                line = line[len(prefix):].strip()
+                break
+
+        if not line:
+            continue
+
+        if len(line) > 30:
+            continue
+
+        lowered = line.lower()
+        if lowered.startswith("http://") or lowered.startswith("https://"):
+            continue
+
+        if line in seen:
+            continue
+
+        seen.add(line)
+        queries.append(line)
+
+    if queries:
+        return queries[:12]
+
+    fallback = (fallback_query or "").strip()
+    return [fallback[:40]] if fallback else []
+
+
+def fetch_google_news_articles(queries, limit_per_query=1, max_total=12):
+    articles = []
+    search_links = []
+    seen_links = set()
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for query in queries:
+        if len(articles) >= max_total:
+            break
+
+        search_query = f"when:1d {query}".strip()
+        encoded = urllib.parse.quote(search_query)
+        rss_url = (
+            f"https://news.google.com/rss/search?q={encoded}"
+            f"&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        )
+        search_links.append(rss_url)
+
+        try:
+            feed = feedparser.parse(rss_url)
+            added_for_query = 0
+
+            for entry in getattr(feed, "entries", []):
+                title = getattr(entry, "title", "").strip()
+                link = resolve_final_url(
+                    getattr(entry, "link", "").strip(),
+                    headers=headers,
+                )
+
+                if not title or not link or link in seen_links:
+                    continue
+
+                seen_links.add(link)
+                articles.append(
+                    {
+                        "query": query,
+                        "title": title,
+                        "link": link,
+                    }
+                )
+                added_for_query += 1
+
+                if added_for_query >= limit_per_query or len(articles) >= max_total:
+                    break
+        except Exception as e:
+            logger.warning("fetch_google_news_articles error (%s): %s", query, e)
+
+    return articles, dedupe_links(search_links)
+
+
 # ===== 市場資料 =====
 def fetch_market_intel_by_query(query):
     results = []
@@ -766,6 +880,67 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
             f"⚠️ 排程任務 {schedule_name} 產生失敗\n\n"
             f"任務內容：{task_prompt}\n\n"
             "請稍後重試或調整任務描述。"
+        )
+
+
+def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
+    try:
+        query_text = task_prompt[:120].strip() or user_keywords.get(chat_id, "AI")
+        queries = extract_schedule_queries(task_prompt, query_text)
+        articles, search_links = fetch_google_news_articles(queries)
+
+        if articles:
+            market_text = "\n".join(
+                [
+                    f"- 關鍵字：{article['query']}\n"
+                    f"  標題：{article['title']}\n"
+                    f"  網址：{article['link']}"
+                    for article in articles[:12]
+                ]
+            )
+        else:
+            market_text = "目前沒有查到可用的一日內 Google News 新聞，請直接說明查無資料，不要自造新聞或網址。"
+
+        prompt = f"""
+你是一位招生與市場情報助理，請根據使用者任務產出適合 Telegram 閱讀的回覆。
+排程名稱：{schedule_name}
+
+任務內容：
+{task_prompt}
+
+以下是已查到的真實 Google News 新聞資料：
+{market_text}
+
+請嚴格遵守：
+1. 只能使用上方提供的真實新聞標題與網址。
+2. 禁止產生、猜測或示範用網址，例如 example.com。
+3. 如果某個課程名稱查不到合適新聞，請直接寫「查無一日內相關新聞」。
+4. 回覆格式要適合 Telegram 閱讀，並保留每則新聞的真實網址。
+5. 不要把 Dcard、PTT 當成資料來源；本次只使用 Google News。
+6. 若使用薪資或產業趨勢補充說法，沒有真實來源就不要編造數字。
+"""
+
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=45
+        )
+        result = response.choices[0].message.content
+
+        article_links = [article["link"] for article in articles]
+        clean_links = dedupe_links(article_links)
+        if clean_links:
+            result += "\n\n📎 資料來源（Google News）：\n" + "\n".join(clean_links[:12])
+        elif search_links:
+            result += "\n\n📎 Google News 搜尋：\n" + "\n".join(search_links[:12])
+
+        return result
+    except Exception as e:
+        logger.exception("generate_custom_schedule_task error: %s", e)
+        return (
+            f"⚠️ 排程 {schedule_name} 執行失敗\n\n"
+            f"任務內容：{task_prompt}\n\n"
+            "請稍後再試或縮短關鍵字後重試。"
         )
 
 
