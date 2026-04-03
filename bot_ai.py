@@ -329,6 +329,10 @@ def load_schedule_config():
                 "minute": int(item["minute"]),
                 "group_id": int(item["group_id"]),
                 "task_prompt": str(item.get("task_prompt", "")).strip(),
+                "owner_user_id": int(item.get("owner_user_id", item["chat_id"])),
+                "owner_name": str(item.get("owner_name", "")).strip(),
+                "created_at": str(item.get("created_at", "")).strip(),
+                "updated_at": str(item.get("updated_at", "")).strip(),
             }
             for schedule_name, item in data.items()
         }
@@ -778,6 +782,10 @@ def format_schedule_detail(schedule_name, item):
         f"時間：{item['hour']:02d}:{item['minute']:02d}\n"
         f"群組ID：{item['group_id']}\n"
         f"建立者 chat_id：{item['chat_id']}\n"
+        f"建立者 user_id：{item.get('owner_user_id', item['chat_id'])}\n"
+        f"建立者名稱：{item.get('owner_name') or '未記錄'}\n"
+        f"建立時間：{item.get('created_at') or '未記錄'}\n"
+        f"最後更新：{item.get('updated_at') or '未記錄'}\n"
         f"最近成功執行：{last_success_at}\n"
         f"最近成功來源：{last_trigger_type}\n"
         f"最近執行狀態：{last_status}\n"
@@ -793,6 +801,11 @@ def get_schedule_for_chat(chat_id, schedule_name):
     return config, item
 
 
+def get_schedule_any(schedule_name):
+    config = load_schedule_config()
+    return config, config.get(schedule_name)
+
+
 async def apply_schedule_task(update: Update, context: ContextTypes.DEFAULT_TYPE, schedule_name: str, task_prompt: str):
     chat_id = update.effective_chat.id
     config, item = get_schedule_for_chat(chat_id, schedule_name)
@@ -805,6 +818,7 @@ async def apply_schedule_task(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     task_prompt = task_prompt.rstrip()
     item["task_prompt"] = task_prompt
+    item["updated_at"] = datetime.datetime.now(tz).isoformat()
     config[schedule_name] = item
     save_schedule_config(config)
 
@@ -1144,17 +1158,28 @@ async def setschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hour, minute = map(int, context.args[1].strip().split(":"))
         group_id = int(context.args[2].strip())
         chat_id = update.effective_chat.id
+        user = update.effective_user
 
         config = load_schedule_config()
         existing_task_prompt = ""
+        existing_created_at = datetime.datetime.now(tz).isoformat()
+        owner_user_id = int(user.id) if user else chat_id
+        owner_name = user.full_name if user else ""
         if schedule_name in config and int(config[schedule_name].get("chat_id", 0)) == chat_id:
             existing_task_prompt = config[schedule_name].get("task_prompt", "")
+            existing_created_at = config[schedule_name].get("created_at", existing_created_at)
+            owner_user_id = int(config[schedule_name].get("owner_user_id", owner_user_id))
+            owner_name = config[schedule_name].get("owner_name", owner_name)
         config[schedule_name] = {
             "chat_id": chat_id,
             "hour": hour,
             "minute": minute,
             "group_id": group_id,
             "task_prompt": existing_task_prompt,
+            "owner_user_id": owner_user_id,
+            "owner_name": owner_name,
+            "created_at": existing_created_at,
+            "updated_at": datetime.datetime.now(tz).isoformat(),
         }
         save_schedule_config(config)
 
@@ -1181,18 +1206,15 @@ async def showschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     config = load_schedule_config()
-    chat_id = update.effective_chat.id
 
     lines = ["🗓️ 目前排程設定："]
     has_item = False
 
     for schedule_name, item in sorted(config.items()):
-        if item.get("chat_id") != chat_id:
-            continue
         has_item = True
         task_status = "已設任務" if item.get("task_prompt") else "預設文案"
         lines.append(
-            f"- {schedule_name} → {item['hour']:02d}:{item['minute']:02d} / 群組 {item['group_id']} / {task_status}"
+            f"- {schedule_name} → {item['hour']:02d}:{item['minute']:02d} / 群組 {item['group_id']} / {task_status} / 建立者 {item.get('owner_name') or item.get('owner_user_id', item['chat_id'])}"
         )
 
     if not has_item:
@@ -1329,11 +1351,9 @@ async def viewschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     schedule_name = context.args[0].strip().lower()
-    chat_id = update.effective_chat.id
-    config = load_schedule_config()
-    item = config.get(schedule_name)
+    _, item = get_schedule_any(schedule_name)
 
-    if not item or int(item.get("chat_id", 0)) != chat_id:
+    if not item:
         await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
         return
 
@@ -1365,6 +1385,7 @@ async def updateschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         item["hour"] = hour
         item["minute"] = minute
         item["group_id"] = group_id
+        item["updated_at"] = datetime.datetime.now(tz).isoformat()
         config[schedule_name] = item
         save_schedule_config(config)
 
@@ -1436,12 +1457,7 @@ async def exportschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     config = load_schedule_config()
-    chat_id = update.effective_chat.id
-    matched = [
-        (schedule_name, item)
-        for schedule_name, item in sorted(config.items())
-        if int(item.get("chat_id", 0)) == chat_id
-    ]
+    matched = sorted(config.items())
 
     if not matched:
         await update.message.reply_text("📤 目前沒有可匯出的排程設定")
@@ -1454,10 +1470,42 @@ async def exportschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not task_preview:
             task_preview = "未設定，使用預設 AI 文案流程"
         lines.append(
-            f"- {schedule_name} | {item['hour']:02d}:{item['minute']:02d} | 群組 {item['group_id']} | {task_preview}"
+            f"- {schedule_name} | {item['hour']:02d}:{item['minute']:02d} | 群組 {item['group_id']} | 建立者 {item.get('owner_name') or item.get('owner_user_id', item['chat_id'])} | {task_preview}"
         )
 
     await update.message.reply_text("\n".join(lines))
+
+
+async def schedulelogs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/schedulelogs 排程名稱")
+        return
+
+    schedule_name = context.args[0].strip().lower()
+    _, item = get_schedule_any(schedule_name)
+    if not item:
+        await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+        return
+
+    entry = get_schedule_execution_entry(schedule_name)
+    if not entry:
+        await update.message.reply_text(
+            f"📜 排程執行紀錄：{schedule_name}\n目前尚無執行紀錄"
+        )
+        return
+
+    await update.message.reply_text(
+        f"📜 排程執行紀錄：{schedule_name}\n"
+        f"最近執行狀態：{entry.get('last_status', '未知')}\n"
+        f"最近執行方式：{entry.get('last_trigger_type', '未知')}\n"
+        f"最近嘗試時間：{entry.get('last_attempt_at', '無')}\n"
+        f"最近成功時間：{entry.get('last_success_at', '無')}\n"
+        f"最近錯誤時間：{entry.get('last_error_at', '無')}\n"
+        f"最近錯誤明細：{entry.get('last_detail', '無')}"
+    )
 
 
 def schedule_missed_jobs(job_queue, schedule_config):
@@ -1684,6 +1732,7 @@ def main():
     app.add_handler(CommandHandler("updateschedule", updateschedule))
     app.add_handler(CommandHandler("runschedule", runschedule))
     app.add_handler(CommandHandler("exportschedules", exportschedules))
+    app.add_handler(CommandHandler("schedulelogs", schedulelogs))
     app.add_handler(CommandHandler("delschedule", delschedule))
     app.add_handler(CommandHandler("setgroup", setgroup))
     app.add_handler(CommandHandler("showgroups", showgroups))
