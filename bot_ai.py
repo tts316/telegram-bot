@@ -1055,15 +1055,9 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
                     f"- 網址連結：{short_link}"
                 )
             else:
-                fallback_search_url = (
-                    "https://news.google.com/rss/search"
-                    f"?hl=zh-TW&gl=TW&ceid=TW:zh-Hant&q={urllib.parse.quote(f'when:1d {query}')}"
-                )
-                short_search_url = shorten_url(fallback_search_url)
                 course_lines.append(
                     f"### {query}\n"
-                    "- 新聞標題：查無一日內相關新聞\n"
-                    f"- Google News 查詢：{short_search_url}"
+                    "- 新聞標題：查無一日內相關新聞"
                 )
 
         if course_lines:
