@@ -442,41 +442,6 @@ def resolve_final_url(url, headers=None, timeout=8):
     return cleaned
 
 
-SHORT_URL_CACHE = {}
-
-
-def shorten_url(url, timeout=8):
-    if not isinstance(url, str):
-        return ""
-
-    cleaned = url.strip()
-    if not cleaned:
-        return ""
-
-    cached = SHORT_URL_CACHE.get(cleaned)
-    if cached:
-        return cached
-
-    headers = {"User-Agent": "Mozilla/5.0"}
-    providers = [
-        f"https://tinyurl.com/api-create.php?url={urllib.parse.quote(cleaned, safe='')}",
-        f"https://is.gd/create.php?format=simple&url={urllib.parse.quote(cleaned, safe='')}",
-    ]
-
-    for api_url in providers:
-        try:
-            response = requests.get(api_url, headers=headers, timeout=timeout)
-            short_url = (response.text or "").strip()
-            if response.ok and short_url.startswith(("http://", "https://")):
-                SHORT_URL_CACHE[cleaned] = short_url
-                return short_url
-        except Exception as e:
-            logger.warning("shorten_url error (%s): %s", cleaned, e)
-
-    SHORT_URL_CACHE[cleaned] = cleaned
-    return cleaned
-
-
 def extract_schedule_queries(task_prompt, fallback_query):
     queries = []
     seen = set()
@@ -1048,11 +1013,10 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
         for query in queries:
             article = article_map.get(query)
             if article:
-                short_link = shorten_url(article["link"])
                 course_lines.append(
                     f"### {query}\n"
                     f"- 新聞標題：{article['title']}\n"
-                    f"- 網址連結：{short_link}"
+                    f"- 網址連結：{article['link']}"
                 )
             else:
                 course_lines.append(
@@ -1063,7 +1027,7 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
         if course_lines:
             result += "\n\n📚 各課程新聞索引：\n" + "\n\n".join(course_lines)
 
-        article_links = [shorten_url(article["link"]) for article in articles]
+        article_links = [article["link"] for article in articles]
         clean_links = dedupe_links(article_links)
         if clean_links:
             result += "\n\n📎 資料來源（Google News）：\n" + "\n".join(clean_links[:12])
