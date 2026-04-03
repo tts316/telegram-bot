@@ -532,6 +532,27 @@ def fetch_google_news_articles(queries, limit_per_query=1, max_total=12):
     return articles, dedupe_links(search_links)
 
 
+async def send_long_message(bot, chat_id, text, chunk_size=3500):
+    message = str(text or "").strip()
+    if not message:
+        return
+
+    while message:
+        if len(message) <= chunk_size:
+            await bot.send_message(chat_id=chat_id, text=message)
+            return
+
+        split_at = message.rfind("\n", 0, chunk_size)
+        if split_at <= 0:
+            split_at = chunk_size
+
+        chunk = message[:split_at].strip()
+        if chunk:
+            await bot.send_message(chat_id=chat_id, text=chunk)
+
+        message = message[split_at:].strip()
+
+
 # ===== 市場資料 =====
 def fetch_market_intel_by_query(query):
     results = []
@@ -1711,6 +1732,41 @@ async def runschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 已手動執行排程：{schedule_name}")
 
 
+async def runschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/runschedule 排程名稱")
+        return
+
+    schedule_name = context.args[0].strip().lower()
+    chat_id = update.effective_chat.id
+    config = load_schedule_config()
+    item = config.get(schedule_name)
+
+    if not item or int(item.get("chat_id", 0)) != chat_id:
+        await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+        return
+
+    await update.message.reply_text(f"🧪 正在手動執行排程：{schedule_name}")
+
+    try:
+        await execute_schedule_push(
+            context.bot,
+            chat_id=item["chat_id"],
+            schedule_name=schedule_name,
+            group_id=item["group_id"],
+            task_prompt=item.get("task_prompt", ""),
+            trigger_type="manual",
+        )
+        await update.message.reply_text(f"✅ 已手動執行排程：{schedule_name}")
+    except Exception as e:
+        await update.message.reply_text(
+            f"⚠️ 手動執行排程失敗：{schedule_name}\n原因：{e}"
+        )
+
+
 async def exportschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_operator(update):
         return
@@ -1932,8 +1988,8 @@ async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prom
             f"執行方式：{trigger_type}\n\n{msg}"
         )
 
-        await bot.send_message(chat_id=chat_id, text=personal_text)
-        await bot.send_message(chat_id=group_id, text=group_text)
+        await send_long_message(bot, chat_id, personal_text)
+        await send_long_message(bot, group_id, group_text)
 
         record_schedule_execution(schedule_name, "success", trigger_type)
     except Exception as e:
