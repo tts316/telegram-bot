@@ -1067,9 +1067,6 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
         clean_links = dedupe_links(article_links)
         if clean_links:
             result += "\n\n📎 資料來源（Google News）：\n" + "\n".join(clean_links[:12])
-        elif search_links:
-            shortened_search_links = dedupe_links([shorten_url(link) for link in search_links])
-            result += "\n\n📎 Google News 搜尋：\n" + "\n".join(shortened_search_links[:12])
 
         return result
     except Exception as e:
