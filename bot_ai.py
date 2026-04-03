@@ -761,6 +761,18 @@ def optimize_marketing(chat_id):
 4. 提供更強 CTA
 """
 
+        prompt += (
+            f"\n\n本次需要覆蓋的課程/關鍵字共有 {len(queries)} 個：\n"
+            + "\n".join(f"- {query}" for query in queries)
+            + "\n\n請務必逐一處理每個課程/關鍵字，不要只挑其中 3 則。"
+        )
+
+        prompt += (
+            f"\n\n本次需要覆蓋的課程/關鍵字共有 {len(queries)} 個：\n"
+            + "\n".join(f"- {query}" for query in queries)
+            + "\n\n請務必逐一處理每個課程/關鍵字，不要只挑其中 3 則。"
+        )
+
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
@@ -775,6 +787,54 @@ def optimize_marketing(chat_id):
 
 
 # ===== Dashboard / 報表 =====
+def optimize_marketing(chat_id):
+    try:
+        recent = [c for c in campaign_logs if c["chat_id"] == chat_id][-2:]
+
+        if len(recent) < 2:
+            return "⚠️ 至少要有 2 篇文案後才能使用 /optimize"
+
+        c1, c2 = recent
+        p1 = get_campaign_performance(c1["campaign_id"])
+        p2 = get_campaign_performance(c2["campaign_id"])
+
+        prompt = f"""
+你是一位行銷優化顧問，請分析最近兩篇文案的表現，並提出更好的優化版本。
+
+文案 1：
+{c1['content']}
+
+表現 1：
+- 點擊：{p1.get('click', 0)}
+- 留單：{p1.get('lead', 0)}
+
+文案 2：
+{c2['content']}
+
+表現 2：
+- 點擊：{p2.get('click', 0)}
+- 留單：{p2.get('lead', 0)}
+
+請輸出：
+1. 哪一篇表現較好
+2. 原因分析
+3. 更高轉換率的優化版文案
+4. 更強的 CTA
+"""
+
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=45
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+        logger.exception("optimize_marketing error: %s", e)
+        return "⚠️ optimize 生成失敗"
+
+
 def generate_report(chat_id):
     try:
         data = load_tracking_data()
@@ -888,6 +948,7 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
         query_text = task_prompt[:120].strip() or user_keywords.get(chat_id, "AI")
         queries = extract_schedule_queries(task_prompt, query_text)
         articles, search_links = fetch_google_news_articles(queries)
+        article_map = {article["query"]: article for article in articles}
 
         if articles:
             market_text = "\n".join(
@@ -926,6 +987,29 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
             timeout=45
         )
         result = response.choices[0].message.content
+
+        course_lines = []
+        for query in queries:
+            article = article_map.get(query)
+            if article:
+                course_lines.append(
+                    f"### {query}\n"
+                    f"- 新聞標題：{article['title']}\n"
+                    f"- 網址連結：{article['link']}"
+                )
+            else:
+                fallback_search_url = (
+                    "https://news.google.com/rss/search"
+                    f"?hl=zh-TW&gl=TW&ceid=TW:zh-Hant&q={urllib.parse.quote(f'when:1d {query}')}"
+                )
+                course_lines.append(
+                    f"### {query}\n"
+                    "- 新聞標題：查無一日內相關新聞\n"
+                    f"- Google News 查詢：{fallback_search_url}"
+                )
+
+        if course_lines:
+            result += "\n\n📚 各課程新聞索引：\n" + "\n\n".join(course_lines)
 
         article_links = [article["link"] for article in articles]
         clean_links = dedupe_links(article_links)
