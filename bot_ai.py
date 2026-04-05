@@ -12,6 +12,7 @@ import secrets
 import feedparser
 import urllib.parse
 import html
+import re
 import pytz
 import datetime
 import requests
@@ -1257,7 +1258,7 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
             messages=[{"role": "user", "content": prompt}],
             timeout=60
         )
-        result = html.escape((response.choices[0].message.content or "").strip())
+        result = render_compact_html_text((response.choices[0].message.content or "").strip())
 
         course_lines = []
         for query in queries:
@@ -2376,6 +2377,39 @@ def format_compact_source_label(url, prefix="閱讀更多"):
     parsed = urllib.parse.urlparse((url or "").strip())
     domain = (parsed.netloc or "").replace("www.", "") or "新聞來源"
     return f"{prefix}（{domain}）"
+
+
+def render_compact_html_text(text):
+    raw_text = str(text or "")
+    pattern = re.compile(
+        r"\[(?P<label>[^\]]+)\]\((?P<mdurl>https?://[^\s)]+)\)|(?P<rawurl>https?://[^\s<]+)"
+    )
+
+    parts = []
+    last_end = 0
+
+    for match in pattern.finditer(raw_text):
+        start, end = match.span()
+        if start > last_end:
+            parts.append(html.escape(raw_text[last_end:start]))
+
+        url = match.group("mdurl") or match.group("rawurl") or ""
+        suffix = ""
+        while url and url[-1] in ".,);]":
+            suffix = url[-1] + suffix
+            url = url[:-1]
+
+        if url:
+            parts.append(format_html_link(url, format_compact_source_label(url)))
+        if suffix:
+            parts.append(html.escape(suffix))
+
+        last_end = end
+
+    if last_end < len(raw_text):
+        parts.append(html.escape(raw_text[last_end:]))
+
+    return "".join(parts)
 
 
 def fetch_newsapi_article_for_variant(query):
