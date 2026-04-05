@@ -2927,6 +2927,45 @@ OPENCLAW_PLATFORM_COMMANDS = [
     "/things_mac", "/video_frames", "/wa",
 ]
 
+OPENCLAW_PLATFORM_COMMAND_HELP = [
+    ("/approve", "核准或拒絕存取請求（平台流程）。", "/approve ABC123"),
+    ("/context", "查看/解釋平台如何建立上下文。", "/context"),
+    ("/btw", "用小提示詢問、不改變 session。", "/btw 今天重點是什麼"),
+    ("/export_session", "匯出平台 session（HTML）。", "/export_session"),
+    ("/sessions", "列出平台 sessions。", "/sessions"),
+    ("/subagents", "列出或管理子代理。", "/subagents"),
+    ("/acp", "管理 ACP 連線或 runtime 選項。", "/acp"),
+    ("/focus", "綁定主題或頻道。", "/focus 招生新聞"),
+    ("/unfocus", "解除綁定主題或頻道。", "/unfocus"),
+    ("/agents", "列出可用的 thread-bound agents。", "/agents"),
+    ("/kill", "停止目前任務或代理。", "/kill"),
+    ("/usage", "顯示使用量摘要。", "/usage"),
+    ("/stop", "停止目前執行流程。", "/stop"),
+    ("/activation", "切換或設定行為模式。", "/activation"),
+    ("/send", "傳送系統訊息或設定策略。", "/send 設定行為"),
+    ("/new", "開新 session。", "/new"),
+    ("/compact", "壓縮 session 上下文。", "/compact"),
+    ("/fast", "切換快速模式。", "/fast"),
+    ("/reasoning", "切換推理顯示。", "/reasoning"),
+    ("/elevated", "切換高等模式。", "/elevated"),
+    ("/queue", "調整佇列設定。", "/queue"),
+    ("/1password", "與 1Password CLI 互動。", "/1password"),
+    ("/apple_notes", "管理 Apple Notes。", "/apple_notes"),
+    ("/apple_reminders", "管理 Apple Reminders。", "/apple_reminders"),
+    ("/davhub", "更新與發佈技能清單。", "/davhub"),
+    ("/eightctl", "控制 8x8/Light/設備（平台工具）。", "/eightctl"),
+    ("/gh_issues", "抓取 GitHub issues。", "/gh_issues"),
+    ("/github", "GitHub 相關工具。", "/github"),
+    ("/node_connect", "診斷 OpenAI/Android iOS 連線。", "/node_connect"),
+    ("/openai_whisper", "語音轉文字（Whisper CLI）。", "/openai_whisper"),
+    ("/openai_whisper_api", "語音轉文字（Whisper API）。", "/openai_whisper_api"),
+    ("/openhue", "控制智慧燈泡/場景。", "/openhue"),
+    ("/oracle", "提示最佳實務/指引。", "/oracle"),
+    ("/things_mac", "控制 Things 3。", "/things_mac"),
+    ("/video_frames", "擷取影片影格。", "/video_frames"),
+    ("/wa", "WhatsApp 相關工具。", "/wa"),
+]
+
 
 def build_help_text():
     lines = [
@@ -2954,7 +2993,11 @@ def build_help_text():
 
     lines.append("OpenClaw 平台指令：")
     lines.append("以下指令目前僅提供提示回覆，未在本 bot 內完整實作：")
-    lines.append(", ".join(OPENCLAW_PLATFORM_COMMANDS))
+    for command, description, example in OPENCLAW_PLATFORM_COMMAND_HELP:
+        lines.append(f"{command}")
+        lines.append(f"功能：{description}")
+        lines.append(f"範例：{example}")
+        lines.append("")
     return "\n".join(lines).strip()
 
 
@@ -2970,7 +3013,10 @@ def build_commands_text():
     lines.append("")
     lines.append("🧩 OpenClaw 平台指令")
     lines.append("以下指令目前僅掛載提示，未在本 bot 完整實作：")
-    lines.append(", ".join(OPENCLAW_PLATFORM_COMMANDS))
+    for command, description, example in OPENCLAW_PLATFORM_COMMAND_HELP:
+        lines.append(f"{command}")
+        lines.append(f"- 功能：{description}")
+        lines.append(f"- 範例：{example}")
     return "\n".join(lines).strip()
 
 
