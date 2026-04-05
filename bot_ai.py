@@ -2883,6 +2883,7 @@ INSTALLED_COMMAND_HELP = [
     ("/skill_creator 主題", "產生可重用的 skill / 任務模板。", "/skill_creator 每日競品分析"),
     ("/skill [主題]", "查看 skill 類型，或直接產生特定主題模板。", "/skill 招生新聞"),
     ("/gemini 內容", "若有 GEMINI_API_KEY 則呼叫 Gemini，否則產出可貼給 Gemini 的 prompt。", "/gemini 幫我整理這段需求"),
+    ("/gemini_status", "顯示 Gemini 是否已接上與目前模型。", "/gemini_status"),
     ("/dock_telegram", "顯示目前已在 Telegram 模式。", "/dock_telegram"),
     ("/think low|medium|high", "查看或設定個人思考等級。", "/think high"),
     ("/verbose on|off", "查看或切換個人詳細模式。", "/verbose on"),
@@ -3188,6 +3189,19 @@ async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ gemini 執行失敗：{e}")
 
 
+async def gemini_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = "已設定" if GEMINI_API_KEY else "未設定"
+    await update.message.reply_text(
+        "\n".join(
+            [
+                "🔎 Gemini 狀態",
+                f"GEMINI_API_KEY：{status}",
+                f"GEMINI_MODEL：{GEMINI_MODEL}",
+            ]
+        )
+    )
+
+
 def main():
     ensure_default_admins()
     app = ApplicationBuilder().token(TOKEN).build()
@@ -3207,6 +3221,7 @@ def main():
     app.add_handler(CommandHandler("restart", restart_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("gemini", gemini_command))
+    app.add_handler(CommandHandler("gemini_status", gemini_status_command))
     app.add_handler(CommandHandler("dock_telegram", dock_telegram_command))
     app.add_handler(CommandHandler("think", think_command))
     app.add_handler(CommandHandler("verbose", verbose_command))
