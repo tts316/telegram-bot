@@ -2324,6 +2324,308 @@ async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prom
         raise
 
 
+PROMOTIONAL_PHRASES = [
+    "即將開課",
+    "請盡速報名",
+    "立即報名",
+    "招生中",
+    "名額有限",
+    "優惠截止",
+    "限時優惠",
+    "火熱招生",
+    "報名從速",
+]
+
+
+ARTICLE_TEXT_CACHE = {}
+
+
+def fetch_article_text(url, timeout=None):
+    cleaned = (url or "").strip()
+    if not cleaned:
+        return ""
+
+    cached = ARTICLE_TEXT_CACHE.get(cleaned)
+    if cached is not None:
+        return cached
+
+    try:
+        response = requests.get(
+            cleaned,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=timeout or max(NEWS_SEARCH_TIMEOUT, 12),
+        )
+        soup = BeautifulSoup(response.text, "html.parser")
+        text = " ".join(soup.stripped_strings)
+        ARTICLE_TEXT_CACHE[cleaned] = text[:5000]
+        return ARTICLE_TEXT_CACHE[cleaned]
+    except Exception as e:
+        logger.warning("fetch_article_text error (%s): %s", cleaned, e)
+        ARTICLE_TEXT_CACHE[cleaned] = ""
+        return ""
+
+
+def is_promotional_article(title, url):
+    title_text = (title or "").strip()
+    article_text = fetch_article_text(url)
+    combined = f"{title_text}\n{article_text}"
+    return any(phrase in combined for phrase in PROMOTIONAL_PHRASES)
+
+
+def format_compact_source_label(url, prefix="閱讀更多"):
+    parsed = urllib.parse.urlparse((url or "").strip())
+    domain = (parsed.netloc or "").replace("www.", "") or "新聞來源"
+    return f"{prefix}（{domain}）"
+
+
+def fetch_newsapi_article_for_variant(query):
+    if not NEWS_API_KEY:
+        return None
+
+    try:
+        since = (datetime.datetime.now(tz) - datetime.timedelta(days=1)).isoformat()
+        response = requests.get(
+            "https://newsapi.org/v2/everything",
+            params={
+                "q": f'"{query}" OR {query}',
+                "searchIn": "title,description,content",
+                "sortBy": "publishedAt",
+                "pageSize": 10,
+                "from": since,
+                "language": "zh",
+                "apiKey": NEWS_API_KEY,
+            },
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=max(NEWS_SEARCH_TIMEOUT, 12),
+        )
+        if not response.ok:
+            logger.warning("NewsAPI error (%s): %s", query, response.text[:200])
+            return None
+
+        data = response.json()
+        for item in data.get("articles", []):
+            title = str(item.get("title", "")).strip()
+            link = resolve_final_url(
+                str(item.get("url", "")).strip(),
+                timeout=max(NEWS_SEARCH_TIMEOUT, 12),
+            )
+            if not title or not link:
+                continue
+            if is_promotional_article(title, link):
+                continue
+            return {
+                "query": query,
+                "title": title,
+                "link": link,
+                "source": "NewsAPI",
+            }
+    except Exception as e:
+        logger.warning("fetch_newsapi_article_for_variant error (%s): %s", query, e)
+
+    return None
+
+
+def fetch_google_news_articles(queries, limit_per_query=1, max_total=12):
+    articles = []
+    search_links = []
+    seen_links = set()
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for original_query in queries:
+        if len(articles) >= max_total:
+            break
+
+        selected_article = None
+
+        for variant in build_query_variants(original_query):
+            search_query = f"when:1d {variant}".strip()
+            encoded = urllib.parse.quote(search_query)
+            rss_url = (
+                f"https://news.google.com/rss/search?q={encoded}"
+                f"&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+            )
+            search_links.append(rss_url)
+
+            try:
+                feed = feedparser.parse(rss_url)
+                for entry in getattr(feed, "entries", [])[:6]:
+                    title = getattr(entry, "title", "").strip()
+                    link = resolve_final_url(
+                        getattr(entry, "link", "").strip(),
+                        headers=headers,
+                        timeout=max(NEWS_SEARCH_TIMEOUT, 12),
+                    )
+
+                    if not title or not link or link in seen_links:
+                        continue
+                    if is_promotional_article(title, link):
+                        continue
+
+                    selected_article = {
+                        "query": original_query,
+                        "title": title,
+                        "link": link,
+                        "source": "Google News",
+                    }
+                    break
+            except Exception as e:
+                logger.warning("fetch_google_news_articles error (%s): %s", variant, e)
+
+            if selected_article:
+                break
+
+        if not selected_article:
+            for variant in build_query_variants(original_query):
+                selected_article = fetch_newsapi_article_for_variant(variant)
+                if selected_article:
+                    selected_article["query"] = original_query
+                    if selected_article["link"] in seen_links:
+                        selected_article = None
+                        continue
+                    break
+
+        if selected_article:
+            seen_links.add(selected_article["link"])
+            articles.append(selected_article)
+
+    return articles, dedupe_links(search_links)
+
+
+def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
+    try:
+        query_text = task_prompt[:120].strip() or user_keywords.get(chat_id, "AI")
+        queries = extract_schedule_queries(task_prompt, query_text)
+        articles, _search_links = fetch_google_news_articles(queries)
+        article_map = {article["query"]: article for article in articles}
+
+        if articles:
+            market_text = "\n".join(
+                [
+                    f"- 關鍵字：{article['query']}\n"
+                    f"  標題：{article['title']}\n"
+                    f"  網址：{article['link']}\n"
+                    f"  來源：{article.get('source', 'Google News')}"
+                    for article in articles[:12]
+                ]
+            )
+        else:
+            market_text = "目前沒有查到可用的一日內新聞，請明確寫出查無資料，不要自造新聞或網址。"
+
+        prompt = f"""
+你是一位招生與市場情報助理，請根據使用者任務產出適合 Telegram 閱讀的回覆。
+排程名稱：{schedule_name}
+
+任務內容：
+{task_prompt}
+
+以下是已查到的真實新聞資料：
+{market_text}
+
+請嚴格遵守：
+1. 只能使用上方提供的真實新聞標題與網址。
+2. 禁止產生、猜測或示範用網址，例如 example.com。
+3. 如果某個課程名稱查不到合適新聞，請直接寫「查無一日內相關新聞」。
+4. 不要採用帶有「即將開課」、「請盡速報名」等招生廣告意味的新聞。
+5. 回覆格式要精簡、適合 Telegram 閱讀。
+"""
+
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=70
+        )
+        result = html.escape((response.choices[0].message.content or "").strip())
+
+        course_lines = []
+        for query in queries:
+            article = article_map.get(query)
+            if article:
+                course_lines.append(
+                    f"● {html.escape(query)}\n"
+                    f"新聞：{html.escape(article['title'])}\n"
+                    f"連結：{format_html_link(article['link'], format_compact_source_label(article['link']))}"
+                )
+            else:
+                course_lines.append(
+                    f"● {html.escape(query)}\n"
+                    "新聞：查無一日內相關新聞"
+                )
+
+        source_lines = []
+        for idx, article in enumerate(articles[:12], start=1):
+            source_lines.append(
+                f"• {format_html_link(article['link'], format_compact_source_label(article['link'], f'來源 {idx}'))}"
+            )
+
+        parts = [result]
+        if course_lines:
+            parts.append("\n\n📚 各課程新聞索引：\n" + "\n\n".join(course_lines))
+        if source_lines:
+            parts.append("\n\n📎 資料來源：\n" + "\n".join(source_lines))
+
+        return "".join(parts)
+    except Exception as e:
+        logger.exception("generate_custom_schedule_task error: %s", e)
+        return html.escape(
+            f"⚠️ 排程 {schedule_name} 執行失敗\n\n任務內容：{task_prompt}\n\n請稍後再試。"
+        )
+
+
+async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prompt="", trigger_type="scheduled"):
+    try:
+        if task_prompt:
+            msg = generate_custom_schedule_task(chat_id, schedule_name, task_prompt)
+        else:
+            msg = generate_marketing(chat_id)
+        save_to_notebook(chat_id, msg)
+
+        trigger_label = {
+            "scheduled": "排程AI任務",
+            "manual": "手動執行排程",
+            "catchup": "補跑排程",
+        }.get(trigger_type, "排程AI任務")
+
+        if task_prompt:
+            personal_text = f"📢 {html.escape(trigger_label)}：{html.escape(schedule_name)}\n\n{msg}"
+            group_text = (
+                f"📢 {html.escape(trigger_label)}同步：{html.escape(schedule_name)}\n\n"
+                f"來源 chat_id：{chat_id}\n"
+                f"目標群組：{group_id}\n"
+                f"執行方式：{html.escape(trigger_type)}\n\n{msg}"
+            )
+
+            await send_long_message(
+                bot,
+                chat_id,
+                personal_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            await send_long_message(
+                bot,
+                group_id,
+                group_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        else:
+            personal_text = f"📢 {trigger_label}：{schedule_name}\n\n" + msg
+            group_text = (
+                f"📢 {trigger_label}同步：{schedule_name}\n\n"
+                f"來源 chat_id：{chat_id}\n"
+                f"目標群組：{group_id}\n"
+                f"執行方式：{trigger_type}\n\n{msg}"
+            )
+            await send_long_message(bot, chat_id, personal_text)
+            await send_long_message(bot, group_id, group_text)
+
+        record_schedule_execution(schedule_name, "success", trigger_type)
+    except Exception as e:
+        logger.exception("execute_schedule_push error (%s): %s", schedule_name, e)
+        record_schedule_execution(schedule_name, "error", trigger_type, str(e))
+        raise
+
+
 def main():
     ensure_default_admins()
     app = ApplicationBuilder().token(TOKEN).build()
