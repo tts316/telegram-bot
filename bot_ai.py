@@ -2660,11 +2660,122 @@ async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prom
         raise
 
 
+INSTALLED_COMMAND_HELP = [
+    ("/start", "啟動 bot；未授權者可取得配對流程。", "/start"),
+    ("/whoami", "查看自己的 user_id、username、姓名與權限狀態。", "/whoami"),
+    ("/approveuser 配對碼", "管理者核准新使用者。", "/approveuser ABC12345"),
+    ("/listusers", "查看已授權名單。", "/listusers"),
+    ("/revokeuser user_id", "移除某位使用者權限。", "/revokeuser 123456789"),
+    ("/addadmin user_id", "新增第二管理者。", "/addadmin 123456789"),
+    ("/deleteallpairs", "清空待核准配對碼。", "/deleteallpairs"),
+    ("/marketing", "立即產生 AI 行銷文案。", "/marketing"),
+    ("/optimize", "比較最近兩篇文案並產出優化版。", "/optimize"),
+    ("/report", "查看成效報表。", "/report"),
+    ("/simulate", "模擬 campaign 成效資料。", "/simulate"),
+    ("/setkeyword 關鍵字", "設定搜尋關鍵字。", "/setkeyword AI 招生"),
+    ("/setsource 來源", "設定搜尋來源輔助字。", "/setsource Google News"),
+    ("/settopic 主題", "設定主題。", "/settopic AI 課程招生"),
+    ("/settime HH:MM", "設定舊版單一每日推播時間。", "/settime 09:00"),
+    ("/setschedule 名稱 HH:MM 群組ID", "建立自訂排程。", "/setschedule 每日招生新聞 08:00 -5114067569"),
+    ("/setscheduletask 名稱 任務內容", "設定排程任務內容。", "/setscheduletask 每日招生新聞 搜尋一日內新聞並整理"),
+    ("/setscheduletaskedit 名稱", "用回覆多行文字方式設定任務內容。", "/setscheduletaskedit 每日招生新聞"),
+    ("/setscheduletaskfile 名稱", "用回覆 .txt/.md 檔方式設定任務內容。", "/setscheduletaskfile 每日招生新聞"),
+    ("/showschedules", "查看所有排程摘要。", "/showschedules"),
+    ("/viewschedule 名稱", "查看單一排程明細。", "/viewschedule 每日招生新聞"),
+    ("/updateschedule 名稱 HH:MM 群組ID", "修改既有排程時間與群組。", "/updateschedule 每日招生新聞 13:00 -5114067569"),
+    ("/runschedule 名稱", "立即手動執行一次排程。", "/runschedule 每日招生新聞"),
+    ("/exportschedules", "匯出所有排程摘要。", "/exportschedules"),
+    ("/schedulelogs 名稱", "查看最近執行紀錄。", "/schedulelogs 每日招生新聞"),
+    ("/delschedule 名稱", "刪除排程。", "/delschedule 每日招生新聞"),
+    ("/setgroup 類型 群組ID", "設定不同訊息類型的群組路由。", "/setgroup report -5114067569"),
+    ("/showgroups", "查看群組路由設定。", "/showgroups"),
+    ("/delgroup 類型", "刪除某類型群組路由。", "/delgroup report"),
+]
+
+OPENCLAW_PLATFORM_COMMANDS = [
+    "/help", "/commands", "/tools", "/skill", "/status", "/approve", "/context", "/btw",
+    "/export_session", "/sessions", "/subagents", "/acp", "/focus", "/unfocus", "/agents",
+    "/kill", "/usage", "/stop", "/restart", "/activation", "/send", "/reset", "/new",
+    "/compact", "/think", "/verbose", "/fast", "/reasoning", "/elevated", "/exec",
+    "/model", "/models", "/queue", "/dock_telegram", "/1password", "/apple_notes",
+    "/apple_reminders", "/davhub", "/eightctl", "/gemini", "/gh_issues", "/gifgrep",
+    "/github", "/healthcheck", "/model_usage", "/nano_pdf", "/node_connect",
+    "/openai_whisper", "/openai_whisper_api", "/openhue", "/oracle", "/skill_creator",
+    "/summarize", "/things_mac", "/video_frames", "/wa", "/weather",
+]
+
+
+def build_help_text():
+    lines = [
+        "📘 指令說明",
+        "",
+        "以下為本 bot 已安裝指令。",
+        "你在 Telegram 對話欄看到的其他 OpenClaw 指令，若未列於「已安裝指令」，代表目前尚未安裝到本 bot。",
+        "本次已讓這些 OpenClaw 指令可回應提示，但它們不是這支 Zeabur Python bot 的完整原生功能。",
+        "",
+        "常用功能：",
+    ]
+
+    for command, description, example in INSTALLED_COMMAND_HELP[:12]:
+        lines.append(f"{command}")
+        lines.append(f"功能：{description}")
+        lines.append(f"範例：{example}")
+        lines.append("")
+
+    lines.append("排程與群組管理：")
+    for command, description, example in INSTALLED_COMMAND_HELP[12:]:
+        lines.append(f"{command}")
+        lines.append(f"功能：{description}")
+        lines.append(f"範例：{example}")
+        lines.append("")
+
+    lines.append("OpenClaw 平台指令：")
+    lines.append("以下指令目前僅提供提示回覆，未在本 bot 內完整實作：")
+    lines.append(", ".join(OPENCLAW_PLATFORM_COMMANDS))
+    return "\n".join(lines).strip()
+
+
+def build_commands_text():
+    lines = [
+        "📋 已安裝指令清單",
+        "",
+    ]
+    for command, description, example in INSTALLED_COMMAND_HELP:
+        lines.append(f"{command}")
+        lines.append(f"- 功能：{description}")
+        lines.append(f"- 範例：{example}")
+    lines.append("")
+    lines.append("🧩 OpenClaw 平台指令")
+    lines.append("以下指令目前僅掛載提示，未在本 bot 完整實作：")
+    lines.append(", ".join(OPENCLAW_PLATFORM_COMMANDS))
+    return "\n".join(lines).strip()
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_long_message(context.bot, update.effective_chat.id, build_help_text())
+
+
+async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_long_message(context.bot, update.effective_chat.id, build_commands_text())
+
+
+async def openclaw_platform_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    command_text = (update.message.text or "").split()[0]
+    await update.message.reply_text(
+        f"ℹ️ {command_text}\n"
+        "這是 OpenClaw 平台指令。\n"
+        "目前這支 Zeabur Python bot 只掛載了提示回覆，尚未在 bot 內完整實作此功能。\n"
+        "請輸入 /help 查看本 bot 已安裝指令。"
+    )
+
+
 def main():
     ensure_default_admins()
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("commands", commands_command))
     app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("approveuser", approveuser))
     app.add_handler(CommandHandler("listusers", listusers))
@@ -2693,6 +2804,18 @@ def main():
     app.add_handler(CommandHandler("setgroup", setgroup))
     app.add_handler(CommandHandler("showgroups", showgroups))
     app.add_handler(CommandHandler("delgroup", delgroup))
+    app.add_handler(CommandHandler([
+        "tools", "skill", "status", "approve", "context", "btw", "export_session",
+        "sessions", "subagents", "acp", "focus", "unfocus", "agents", "kill",
+        "usage", "stop", "restart", "activation", "send", "reset", "new",
+        "compact", "think", "verbose", "fast", "reasoning", "elevated", "exec",
+        "model", "models", "queue", "dock_telegram", "1password", "apple_notes",
+        "apple_reminders", "davhub", "eightctl", "gemini", "gh_issues", "gifgrep",
+        "github", "healthcheck", "model_usage", "nano_pdf", "node_connect",
+        "openai_whisper", "openai_whisper_api", "openhue", "oracle",
+        "skill_creator", "summarize", "things_mac", "video_frames", "wa",
+        "weather"
+    ], openclaw_platform_command))
 
     if TARGET_CHAT_ID:
         try:
