@@ -17,6 +17,7 @@ import pytz
 import datetime
 import requests
 import uuid
+import threading
 
 from bs4 import BeautifulSoup
 from datetime import time
@@ -39,6 +40,9 @@ TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 NEWS_SEARCH_TIMEOUT = int(os.getenv("NEWS_SEARCH_TIMEOUT", "10"))
+WEATHER_LOCATION = os.getenv("WEATHER_LOCATION", "Taipei")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 TRACK_BASE_URL = os.getenv("TRACK_BASE_URL", "https://your-domain.com")
 LANDING_PAGE_URL = os.getenv("LANDING_PAGE_URL", "https://your-landing-page.com")
@@ -52,11 +56,13 @@ SCHEDULE_CONFIG_FILE = os.path.join(DATA_DIR, "schedule_config.json")
 AUTHORIZED_USERS_FILE = os.path.join(DATA_DIR, "authorized_users.json")
 PAIR_CODES_FILE = os.path.join(DATA_DIR, "pending_pair_codes.json")
 SCHEDULE_EXECUTION_LOG_FILE = os.path.join(DATA_DIR, "schedule_execution_log.json")
+SESSION_SETTINGS_FILE = os.path.join(DATA_DIR, "session_settings.json")
 LEGACY_GROUP_CONFIG_FILE = os.path.join(BASE_DIR, "group_config.json")
 LEGACY_SCHEDULE_CONFIG_FILE = os.path.join(BASE_DIR, "schedule_config.json")
 LEGACY_AUTHORIZED_USERS_FILE = os.path.join(BASE_DIR, "authorized_users.json")
 LEGACY_PAIR_CODES_FILE = os.path.join(BASE_DIR, "pending_pair_codes.json")
 LEGACY_SCHEDULE_EXECUTION_LOG_FILE = os.path.join(BASE_DIR, "schedule_execution_log.json")
+LEGACY_SESSION_SETTINGS_FILE = os.path.join(BASE_DIR, "session_settings.json")
 ALLOWED_REPORT_TYPES = ["marketing", "report", "optimize", "daily_push"]
 ADMIN_USER_IDS = {
     int(value.strip())
@@ -216,6 +222,37 @@ def load_pair_codes():
 
 def save_pair_codes(data):
     save_json(PAIR_CODES_FILE, data)
+
+
+def load_session_settings():
+    try:
+        return load_json_with_fallback(
+            SESSION_SETTINGS_FILE,
+            LEGACY_SESSION_SETTINGS_FILE if SESSION_SETTINGS_FILE != LEGACY_SESSION_SETTINGS_FILE else None,
+            {},
+        )
+    except Exception as e:
+        logger.warning("load_session_settings error: %s", e)
+        return {}
+
+
+def save_session_settings(data):
+    save_json(SESSION_SETTINGS_FILE, data)
+
+
+def get_user_session_settings(user_id):
+    data = load_session_settings()
+    return data.get(str(user_id), {"think": "medium", "verbose": False})
+
+
+def update_user_session_settings(user_id, **kwargs):
+    data = load_session_settings()
+    key = str(user_id)
+    current = data.get(key, {"think": "medium", "verbose": False})
+    current.update(kwargs)
+    data[key] = current
+    save_session_settings(data)
+    return current
 
 
 def load_schedule_execution_log():
@@ -2660,6 +2697,174 @@ async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prom
         raise
 
 
+def get_command_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args:
+        return " ".join(context.args).strip()
+
+    if update.message and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        return (reply.text or reply.caption or "").strip()
+
+    return ""
+
+
+def get_status_text(user=None):
+    session = get_user_session_settings(user.id) if user else {"think": "medium", "verbose": False}
+    schedule_count = len(load_schedule_config())
+    auth = load_authorized_users()
+    return "\n".join(
+        [
+            "🟢 Bot 狀態正常",
+            f"模型：{OPENAI_MODEL}",
+            f"資料目錄：{DATA_DIR}",
+            f"自訂排程數：{schedule_count}",
+            f"管理者數：{len(auth.get('admins', []))}",
+            f"操作員數：{len(auth.get('operators', []))}",
+            f"NEWS_API_KEY：{'已設定' if NEWS_API_KEY else '未設定'}",
+            f"GEMINI_API_KEY：{'已設定' if GEMINI_API_KEY else '未設定'}",
+            f"思考等級：{session.get('think', 'medium')}",
+            f"詳細模式：{'開啟' if session.get('verbose') else '關閉'}",
+        ]
+    )
+
+
+def get_weather_text(location):
+    target = (location or WEATHER_LOCATION).strip() or WEATHER_LOCATION
+    response = requests.get(
+        f"https://wttr.in/{urllib.parse.quote(target)}",
+        params={"format": "j1"},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=12,
+    )
+    data = response.json()
+    current = (data.get("current_condition") or [{}])[0]
+    desc = ((current.get("weatherDesc") or [{}])[0].get("value") or "").strip()
+    temp_c = current.get("temp_C", "?")
+    feels = current.get("FeelsLikeC", "?")
+    humidity = current.get("humidity", "?")
+    return "\n".join(
+        [
+            f"🌤️ 天氣：{target}",
+            f"狀況：{desc or '未知'}",
+            f"溫度：{temp_c}°C",
+            f"體感：{feels}°C",
+            f"濕度：{humidity}%",
+        ]
+    )
+
+
+def summarize_text_content(text, user_id=None):
+    session = get_user_session_settings(user_id) if user_id else {"think": "medium", "verbose": False}
+    detail = "詳細" if session.get("verbose") else "精簡"
+    prompt = (
+        f"請用繁體中文做{detail}摘要，條列重點、關鍵結論與可執行建議。"
+        f"思考深度偏好：{session.get('think', 'medium')}。\n\n{text}"
+    )
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        timeout=60,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def generate_skill_template(topic):
+    clean_topic = (topic or "招生新聞任務").strip()
+    return "\n".join(
+        [
+            f"🧩 Skill 範本：{clean_topic}",
+            "1. 任務目標：說明這個 skill 要解決什麼問題",
+            "2. 輸入資料：列出會提供哪些關鍵字、來源、限制",
+            "3. 執行步驟：",
+            "- 搜尋最近一日內新聞",
+            "- 排除招生廣告型內容",
+            "- 摘要可用重點",
+            "- 產出可用回報格式",
+            "4. 輸出格式：標題、摘要、連結、建議",
+            "",
+            "範例用途：",
+            f"/setscheduletask 每日技能 {clean_topic} ...",
+        ]
+    )
+
+
+def list_tool_text():
+    return "\n".join(
+        [
+            "🧰 可用工具 / 能力",
+            "- OpenAI：文案、摘要、優化",
+            "- Google News：新聞搜尋",
+            "- NewsAPI：補強新聞搜尋",
+            "- Google Sheets：追蹤資料讀取",
+            "- Telegram 排程：定時推播與群組路由",
+            "- 目前不含完整 OpenClaw runtime shell / subagent 執行環境",
+        ]
+    )
+
+
+def generate_gifgrep_text(query):
+    clean_query = (query or "").strip()
+    if not clean_query:
+        clean_query = "AI marketing"
+    encoded = urllib.parse.quote(clean_query)
+    return "\n".join(
+        [
+            f"🎞️ GIF 搜尋：{clean_query}",
+            f"Tenor：https://tenor.com/search/{encoded}-gifs",
+            f"Giphy：https://giphy.com/search/{encoded}",
+        ]
+    )
+
+
+def generate_nano_pdf_text(text):
+    clean_text = (text or "").strip()
+    if not clean_text:
+        return "⚠️ 用法：/nano_pdf 文字內容，或回覆一段文字後輸入 /nano_pdf"
+    return "\n".join(
+        [
+            "📄 Nano PDF 摘要大綱",
+            "1. 封面標題",
+            "2. 一頁摘要",
+            "3. 核心重點 3-5 點",
+            "4. 圖表或數據建議",
+            "5. 行動建議",
+            "",
+            "內容摘要：",
+            summarize_text_content(clean_text[:4000]),
+        ]
+    )
+
+
+def run_gemini_prompt(text):
+    clean_text = (text or "").strip()
+    if not clean_text:
+        return "⚠️ 用法：/gemini 問題內容，或回覆文字後輸入 /gemini"
+
+    if not GEMINI_API_KEY:
+        return "\n".join(
+            [
+                "ℹ️ 目前未設定 GEMINI_API_KEY。",
+                "你可以把下面這段直接貼到 Gemini：",
+                "",
+                clean_text,
+            ]
+        )
+
+    response = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
+        headers={"Content-Type": "application/json"},
+        json={"contents": [{"parts": [{"text": clean_text}]}]},
+        timeout=40,
+    )
+    data = response.json()
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return "⚠️ Gemini 沒有回傳內容。"
+    parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
+    text_parts = [part.get("text", "").strip() for part in parts if part.get("text")]
+    return "\n".join(text_parts).strip() or "⚠️ Gemini 沒有可讀取內容。"
+
+
 INSTALLED_COMMAND_HELP = [
     ("/start", "啟動 bot；未授權者可取得配對流程。", "/start"),
     ("/whoami", "查看自己的 user_id、username、姓名與權限狀態。", "/whoami"),
@@ -2668,6 +2873,25 @@ INSTALLED_COMMAND_HELP = [
     ("/revokeuser user_id", "移除某位使用者權限。", "/revokeuser 123456789"),
     ("/addadmin user_id", "新增第二管理者。", "/addadmin 123456789"),
     ("/deleteallpairs", "清空待核准配對碼。", "/deleteallpairs"),
+    ("/status", "查看 bot 狀態、模型、排程數量與 API 設定。", "/status"),
+    ("/model", "查看目前 OpenAI 模型。", "/model"),
+    ("/models", "查看目前模型與可切換方式。", "/models"),
+    ("/model_usage", "查看模型使用概況。", "/model_usage"),
+    ("/weather [地點]", "查詢天氣；未填則用預設地點。", "/weather Taipei"),
+    ("/tools", "查看這支 bot 可用工具與整合。", "/tools"),
+    ("/summarize 文字", "摘要一段文字，或回覆文字後使用。", "/summarize 請幫我摘要這段內容"),
+    ("/skill_creator 主題", "產生可重用的 skill / 任務模板。", "/skill_creator 每日競品分析"),
+    ("/skill [主題]", "查看 skill 類型，或直接產生特定主題模板。", "/skill 招生新聞"),
+    ("/gemini 內容", "若有 GEMINI_API_KEY 則呼叫 Gemini，否則產出可貼給 Gemini 的 prompt。", "/gemini 幫我整理這段需求"),
+    ("/dock_telegram", "顯示目前已在 Telegram 模式。", "/dock_telegram"),
+    ("/think low|medium|high", "查看或設定個人思考等級。", "/think high"),
+    ("/verbose on|off", "查看或切換個人詳細模式。", "/verbose on"),
+    ("/exec 子指令", "執行部分內建指令，如 marketing/report/optimize/status/weather。", "/exec status"),
+    ("/gifgrep 關鍵字", "快速產出 GIF 搜尋連結。", "/gifgrep AI marketing"),
+    ("/healthcheck", "查看 bot 健康狀態。", "/healthcheck"),
+    ("/nano_pdf 文字", "將文字整理成 PDF 摘要大綱。", "/nano_pdf 請整理這段文章"),
+    ("/restart confirm", "管理者重啟 Zeabur bot。", "/restart confirm"),
+    ("/reset", "重設目前聊天的 keyword/source/topic 與個人 think/verbose。", "/reset"),
     ("/marketing", "立即產生 AI 行銷文案。", "/marketing"),
     ("/optimize", "比較最近兩篇文案並產出優化版。", "/optimize"),
     ("/report", "查看成效報表。", "/report"),
@@ -2693,15 +2917,13 @@ INSTALLED_COMMAND_HELP = [
 ]
 
 OPENCLAW_PLATFORM_COMMANDS = [
-    "/help", "/commands", "/tools", "/skill", "/status", "/approve", "/context", "/btw",
-    "/export_session", "/sessions", "/subagents", "/acp", "/focus", "/unfocus", "/agents",
-    "/kill", "/usage", "/stop", "/restart", "/activation", "/send", "/reset", "/new",
-    "/compact", "/think", "/verbose", "/fast", "/reasoning", "/elevated", "/exec",
-    "/model", "/models", "/queue", "/dock_telegram", "/1password", "/apple_notes",
-    "/apple_reminders", "/davhub", "/eightctl", "/gemini", "/gh_issues", "/gifgrep",
-    "/github", "/healthcheck", "/model_usage", "/nano_pdf", "/node_connect",
-    "/openai_whisper", "/openai_whisper_api", "/openhue", "/oracle", "/skill_creator",
-    "/summarize", "/things_mac", "/video_frames", "/wa", "/weather",
+    "/approve", "/context", "/btw", "/export_session", "/sessions", "/subagents", "/acp",
+    "/focus", "/unfocus", "/agents", "/kill", "/usage", "/stop", "/activation", "/send",
+    "/new", "/compact", "/fast", "/reasoning", "/elevated", "/queue", "/1password", "/apple_notes",
+    "/apple_reminders", "/davhub", "/eightctl", "/gh_issues",
+    "/github", "/node_connect",
+    "/openai_whisper", "/openai_whisper_api", "/openhue", "/oracle",
+    "/things_mac", "/video_frames", "/wa",
 ]
 
 
@@ -2769,6 +2991,203 @@ async def openclaw_platform_command(update: Update, context: ContextTypes.DEFAUL
     )
 
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(get_status_text(update.effective_user))
+
+
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🤖 目前模型：{OPENAI_MODEL}")
+
+
+async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "\n".join(
+            [
+                "📚 模型清單",
+                f"目前使用：{OPENAI_MODEL}",
+                "可切換方式：修改 Zeabur 環境變數 OPENAI_MODEL",
+                "Gemini 預設：{}".format(GEMINI_MODEL),
+            ]
+        )
+    )
+
+
+async def model_usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "\n".join(
+            [
+                "📈 模型使用狀態",
+                f"OpenAI 模型：{OPENAI_MODEL}",
+                f"Gemini 模型：{GEMINI_MODEL}",
+                "目前 bot 尚未實作 token / cost 累計記錄。",
+            ]
+        )
+    )
+
+
+async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    location = get_command_input(update, context) or WEATHER_LOCATION
+    try:
+        await update.message.reply_text(get_weather_text(location))
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ weather 查詢失敗：{e}")
+
+
+async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = get_command_input(update, context)
+    if not text:
+        await update.message.reply_text("⚠️ 用法：/summarize 文字內容，或回覆一段文字後輸入 /summarize")
+        return
+    await send_long_message(
+        context.bot,
+        update.effective_chat.id,
+        summarize_text_content(text[:6000], update.effective_user.id if update.effective_user else None),
+    )
+
+
+async def skill_creator_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_long_message(
+        context.bot,
+        update.effective_chat.id,
+        generate_skill_template(get_command_input(update, context)),
+    )
+
+
+async def skill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = get_command_input(update, context)
+    if topic:
+        await send_long_message(context.bot, update.effective_chat.id, generate_skill_template(topic))
+    else:
+        await update.message.reply_text(
+            "🧩 目前可用 skill 類型：招生新聞、競品分析、每日文案、成效摘要。\n"
+            "範例：/skill_creator 每日競品新聞摘要"
+        )
+
+
+async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(list_tool_text())
+
+
+async def dock_telegram_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📌 目前已在 Telegram 模式中執行。")
+
+
+async def think_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+    value = get_command_input(update, context).lower()
+    if value in {"low", "medium", "high"}:
+        session = update_user_session_settings(user.id, think=value)
+        await update.message.reply_text(f"🧠 思考等級已設定為：{session['think']}")
+        return
+    session = get_user_session_settings(user.id)
+    await update.message.reply_text(f"🧠 目前思考等級：{session.get('think', 'medium')}\n用法：/think low|medium|high")
+
+
+async def verbose_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+    value = get_command_input(update, context).lower()
+    if value in {"on", "off"}:
+        session = update_user_session_settings(user.id, verbose=(value == "on"))
+        await update.message.reply_text(f"📝 詳細模式已{'開啟' if session['verbose'] else '關閉'}")
+        return
+    session = get_user_session_settings(user.id)
+    await update.message.reply_text(f"📝 詳細模式：{'開啟' if session.get('verbose') else '關閉'}\n用法：/verbose on|off")
+
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_keywords.pop(chat_id, None)
+    user_sources.pop(chat_id, None)
+    user_topics.pop(chat_id, None)
+    if update.effective_user:
+        update_user_session_settings(update.effective_user.id, think="medium", verbose=False)
+    await update.message.reply_text("♻️ 已重設目前聊天的 keyword/source/topic 與個人 think/verbose 設定。")
+
+
+async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update):
+        return
+    value = get_command_input(update, context).lower()
+    if value != "confirm":
+        await update.message.reply_text("⚠️ 用法：/restart confirm\n這會讓 Zeabur 服務重新啟動。")
+        return
+    await update.message.reply_text("🔄 正在重新啟動 OpenClaw bot...")
+    threading.Timer(1.0, lambda: os._exit(0)).start()
+
+
+async def exec_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+    text = get_command_input(update, context)
+    if not text:
+        await update.message.reply_text("⚠️ 用法：/exec marketing|report|optimize|status|weather [參數]")
+        return
+    parts = text.split()
+    action = parts[0].lower()
+    arg_text = " ".join(parts[1:]).strip()
+
+    if action == "marketing":
+        await update.message.reply_text(generate_marketing(update.effective_chat.id))
+    elif action == "report":
+        await update.message.reply_text(generate_report(update.effective_chat.id))
+    elif action == "optimize":
+        await update.message.reply_text(optimize_marketing(update.effective_chat.id))
+    elif action == "status":
+        await update.message.reply_text(get_status_text(update.effective_user))
+    elif action == "weather":
+        try:
+            await update.message.reply_text(get_weather_text(arg_text or WEATHER_LOCATION))
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ weather 查詢失敗：{e}")
+    else:
+        await update.message.reply_text("⚠️ /exec 目前支援：marketing, report, optimize, status, weather")
+
+
+async def gifgrep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(generate_gifgrep_text(get_command_input(update, context)))
+
+
+async def healthcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    schedule_count = len(load_schedule_config())
+    last_logs = load_schedule_execution_log()
+    await update.message.reply_text(
+        "\n".join(
+            [
+                "🩺 Healthcheck",
+                f"Bot：正常",
+                f"模型：{OPENAI_MODEL}",
+                f"資料目錄：{DATA_DIR}",
+                f"排程數：{schedule_count}",
+                f"執行紀錄數：{len(last_logs)}",
+                f"News API：{'已設定' if NEWS_API_KEY else '未設定'}",
+            ]
+        )
+    )
+
+
+async def nano_pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_long_message(
+        context.bot,
+        update.effective_chat.id,
+        generate_nano_pdf_text(get_command_input(update, context)),
+    )
+
+
+async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await send_long_message(
+            context.bot,
+            update.effective_chat.id,
+            run_gemini_prompt(get_command_input(update, context)),
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ gemini 執行失敗：{e}")
+
+
 def main():
     ensure_default_admins()
     app = ApplicationBuilder().token(TOKEN).build()
@@ -2776,6 +3195,25 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("commands", commands_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("model", model_command))
+    app.add_handler(CommandHandler("models", models_command))
+    app.add_handler(CommandHandler("model_usage", model_usage_command))
+    app.add_handler(CommandHandler("weather", weather_command))
+    app.add_handler(CommandHandler("summarize", summarize_command))
+    app.add_handler(CommandHandler("skill_creator", skill_creator_command))
+    app.add_handler(CommandHandler("skill", skill_command))
+    app.add_handler(CommandHandler("tools", tools_command))
+    app.add_handler(CommandHandler("restart", restart_command))
+    app.add_handler(CommandHandler("reset", reset_command))
+    app.add_handler(CommandHandler("gemini", gemini_command))
+    app.add_handler(CommandHandler("dock_telegram", dock_telegram_command))
+    app.add_handler(CommandHandler("think", think_command))
+    app.add_handler(CommandHandler("verbose", verbose_command))
+    app.add_handler(CommandHandler("exec", exec_command))
+    app.add_handler(CommandHandler("gifgrep", gifgrep_command))
+    app.add_handler(CommandHandler("healthcheck", healthcheck_command))
+    app.add_handler(CommandHandler("nano_pdf", nano_pdf_command))
     app.add_handler(CommandHandler("whoami", whoami))
     app.add_handler(CommandHandler("approveuser", approveuser))
     app.add_handler(CommandHandler("listusers", listusers))
