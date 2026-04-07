@@ -2350,7 +2350,7 @@ async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prom
                 disable_web_page_preview=True,
             )
 
-            if task_prompt and schedule_name.strip() == "每日招生新聞" and "招生銷售文案" in task_prompt:
+            if schedule_name.strip() == "每日招生新聞":
                 summary_source = strip_html_tags(msg)
                 sales_lines = generate_sales_copies_from_report(summary_source[:4000], None)
                 for line in sales_lines:
