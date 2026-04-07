@@ -242,13 +242,13 @@ def save_session_settings(data):
 
 def get_user_session_settings(user_id):
     data = load_session_settings()
-    return data.get(str(user_id), {"think": "medium", "verbose": False})
+    return data.get(str(user_id), {"think": "medium", "verbose": False, "elevated": False})
 
 
 def update_user_session_settings(user_id, **kwargs):
     data = load_session_settings()
     key = str(user_id)
-    current = data.get(key, {"think": "medium", "verbose": False})
+    current = data.get(key, {"think": "medium", "verbose": False, "elevated": False})
     current.update(kwargs)
     data[key] = current
     save_session_settings(data)
@@ -2383,6 +2383,12 @@ def fetch_article_text(url, timeout=None):
     if not cleaned:
         return ""
 
+
+def compact_runtime_state():
+    cleared = len(ARTICLE_TEXT_CACHE)
+    ARTICLE_TEXT_CACHE.clear()
+    return cleared
+
     cached = ARTICLE_TEXT_CACHE.get(cleaned)
     if cached is not None:
         return cached
@@ -2887,6 +2893,8 @@ INSTALLED_COMMAND_HELP = [
     ("/dock_telegram", "顯示目前已在 Telegram 模式。", "/dock_telegram"),
     ("/think low|medium|high", "查看或設定個人思考等級。", "/think high"),
     ("/verbose on|off", "查看或切換個人詳細模式。", "/verbose on"),
+    ("/elevated on|off", "查看或切換 Elevated 模式。", "/elevated on"),
+    ("/compact", "清理暫存資料（文章快取）。", "/compact"),
     ("/exec 子指令", "執行部分內建指令，如 marketing/report/optimize/status/weather。", "/exec status"),
     ("/gifgrep 關鍵字", "快速產出 GIF 搜尋連結。", "/gifgrep AI marketing"),
     ("/healthcheck", "查看 bot 健康狀態。", "/healthcheck"),
@@ -2920,7 +2928,7 @@ INSTALLED_COMMAND_HELP = [
 OPENCLAW_PLATFORM_COMMANDS = [
     "/approve", "/context", "/btw", "/export_session", "/sessions", "/subagents", "/acp",
     "/focus", "/unfocus", "/agents", "/kill", "/usage", "/stop", "/activation", "/send",
-    "/new", "/compact", "/fast", "/reasoning", "/elevated", "/queue", "/1password", "/apple_notes",
+    "/new", "/fast", "/reasoning", "/queue", "/1password", "/apple_notes",
     "/apple_reminders", "/davhub", "/eightctl", "/gh_issues",
     "/github", "/node_connect",
     "/openai_whisper", "/openai_whisper_api", "/openhue", "/oracle",
@@ -3145,6 +3153,29 @@ async def verbose_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📝 詳細模式：{'開啟' if session.get('verbose') else '關閉'}\n用法：/verbose on|off")
 
 
+async def elevated_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+    value = get_command_input(update, context).lower()
+    if value in {"on", "off"}:
+        session = update_user_session_settings(user.id, elevated=(value == "on"))
+        await update.message.reply_text(f"🧩 Elevated 模式已{'開啟' if session['elevated'] else '關閉'}")
+        return
+    session = get_user_session_settings(user.id)
+    await update.message.reply_text(f"🧩 Elevated 模式：{'開啟' if session.get('elevated') else '關閉'}\n用法：/elevated on|off")
+
+
+async def compact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+    cleared = compact_runtime_state()
+    await update.message.reply_text(
+        f"🗜️ 已清理暫存資料：{cleared} 筆文章快取。\n"
+        "若需完整重置，請使用 /reset。"
+    )
+
+
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_keywords.pop(chat_id, None)
@@ -3271,6 +3302,8 @@ def main():
     app.add_handler(CommandHandler("dock_telegram", dock_telegram_command))
     app.add_handler(CommandHandler("think", think_command))
     app.add_handler(CommandHandler("verbose", verbose_command))
+    app.add_handler(CommandHandler("elevated", elevated_command))
+    app.add_handler(CommandHandler("compact", compact_command))
     app.add_handler(CommandHandler("exec", exec_command))
     app.add_handler(CommandHandler("gifgrep", gifgrep_command))
     app.add_handler(CommandHandler("healthcheck", healthcheck_command))
