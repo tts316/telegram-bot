@@ -2320,6 +2320,12 @@ async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prom
             "catchup": "補跑排程",
         }.get(trigger_type, "排程AI任務")
 
+        if task_prompt and schedule_name.strip() == "每日招生新聞":
+            summary_source = strip_html_tags(msg)[:4000]
+            if summary_source:
+                summary = summarize_text_content(summary_source, None)
+                msg += "\n\n🧾 摘要重點：\n" + html.escape(summary)
+
         if task_prompt:
             personal_text = f"📢 {html.escape(trigger_label)}：{html.escape(schedule_name)}\n\n{msg}"
             group_text = (
@@ -2453,6 +2459,12 @@ def render_compact_html_text(text):
         parts.append(html.escape(raw_text[last_end:]))
 
     return "".join(parts)
+
+
+def strip_html_tags(text):
+    raw = str(text or "")
+    no_tags = re.sub(r"<[^>]+>", "", raw)
+    return html.unescape(no_tags).strip()
 
 
 def fetch_newsapi_article_for_variant(query):
@@ -2611,7 +2623,7 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
             messages=[{"role": "user", "content": prompt}],
             timeout=70
         )
-        result = html.escape((response.choices[0].message.content or "").strip())
+        result = render_compact_html_text((response.choices[0].message.content or "").strip())
 
         course_lines = []
         for query in queries:
@@ -2923,6 +2935,21 @@ INSTALLED_COMMAND_HELP = [
     ("/setgroup 類型 群組ID", "設定不同訊息類型的群組路由。", "/setgroup report -5114067569"),
     ("/showgroups", "查看群組路由設定。", "/showgroups"),
     ("/delgroup 類型", "刪除某類型群組路由。", "/delgroup report"),
+    ("/task_commands", "列出任務/排程相關指令明細。", "/task_commands"),
+]
+
+TASK_COMMANDS_HELP = [
+    ("/setschedule 名稱 HH:MM 群組ID", "建立自訂排程。", "/setschedule 每日招生新聞 08:00 -5114067569"),
+    ("/setscheduletask 名稱 任務內容", "設定排程任務內容。", "/setscheduletask 每日招生新聞 搜尋一日內新聞"),
+    ("/setscheduletaskedit 名稱", "用回覆多行文字方式設定任務內容。", "/setscheduletaskedit 每日招生新聞"),
+    ("/setscheduletaskfile 名稱", "用回覆 .txt/.md 檔方式設定任務內容。", "/setscheduletaskfile 每日招生新聞"),
+    ("/showschedules", "查看所有排程摘要。", "/showschedules"),
+    ("/viewschedule 名稱", "查看單一排程明細。", "/viewschedule 每日招生新聞"),
+    ("/updateschedule 名稱 HH:MM 群組ID", "修改既有排程時間與群組。", "/updateschedule 每日招生新聞 13:00 -5114067569"),
+    ("/runschedule 名稱", "立即手動執行一次排程。", "/runschedule 每日招生新聞"),
+    ("/schedulelogs 名稱", "查看最近執行紀錄。", "/schedulelogs 每日招生新聞"),
+    ("/exportschedules", "匯出所有排程摘要。", "/exportschedules"),
+    ("/delschedule 名稱", "刪除排程。", "/delschedule 每日招生新聞"),
 ]
 
 OPENCLAW_PLATFORM_COMMANDS = [
@@ -3034,6 +3061,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_long_message(context.bot, update.effective_chat.id, build_commands_text())
+
+
+async def task_commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lines = ["📋 任務/排程指令明細", ""]
+    for command, description, example in TASK_COMMANDS_HELP:
+        lines.append(f"{command}")
+        lines.append(f"- 功能：{description}")
+        lines.append(f"- 範例：{example}")
+        lines.append("")
+    await send_long_message(context.bot, update.effective_chat.id, "\n".join(lines).strip())
 
 
 async def openclaw_platform_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3286,6 +3323,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("commands", commands_command))
+    app.add_handler(CommandHandler("task_commands", task_commands_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("model", model_command))
     app.add_handler(CommandHandler("models", models_command))
