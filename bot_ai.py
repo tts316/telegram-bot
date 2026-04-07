@@ -2326,6 +2326,12 @@ async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prom
                 summary = summarize_text_content(summary_source, None)
                 msg += "\n\n🧾 摘要重點：\n" + html.escape(summary)
 
+        if task_prompt and schedule_name.strip() == "每日招生新聞":
+            summary_source = strip_html_tags(msg)[:4000]
+            if summary_source:
+                summary = summarize_text_content(summary_source, None)
+                msg += "\n\n🧾 摘要重點：\n" + html.escape(summary)
+
         if task_prompt:
             personal_text = f"📢 {html.escape(trigger_label)}：{html.escape(schedule_name)}\n\n{msg}"
             group_text = (
@@ -2719,6 +2725,28 @@ async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prom
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
+
+            if schedule_name.strip() == "每日招生新聞":
+                summary_source = strip_html_tags(msg)
+                sales_lines = generate_sales_copies_from_report(summary_source[:4000], None)
+                for line in sales_lines:
+                    title_text = "招生銷售文案"
+                    personal_copy = f"🧾 {html.escape(title_text)}\n{html.escape(line)}"
+                    group_copy = f"🧾 {html.escape(title_text)}\n{html.escape(line)}"
+                    await send_long_message(
+                        bot,
+                        chat_id,
+                        personal_copy,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                    await send_long_message(
+                        bot,
+                        group_id,
+                        group_copy,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
         else:
             personal_text = f"📢 {trigger_label}：{schedule_name}\n\n" + msg
             group_text = (
