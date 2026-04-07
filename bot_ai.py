@@ -2349,6 +2349,28 @@ async def execute_schedule_push(bot, chat_id, schedule_name, group_id, task_prom
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
+
+            if task_prompt and schedule_name.strip() == "每日招生新聞" and "招生銷售文案" in task_prompt:
+                summary_source = strip_html_tags(msg)
+                sales_lines = generate_sales_copies_from_report(summary_source[:4000], None)
+                for line in sales_lines:
+                    title_text = "招生銷售文案"
+                    personal_copy = f"🧾 {html.escape(title_text)}\n{html.escape(line)}"
+                    group_copy = f"🧾 {html.escape(title_text)}\n{html.escape(line)}"
+                    await send_long_message(
+                        bot,
+                        chat_id,
+                        personal_copy,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                    await send_long_message(
+                        bot,
+                        group_id,
+                        group_copy,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
         else:
             personal_text = f"📢 {trigger_label}：{schedule_name}\n\n" + msg
             group_text = (
@@ -2784,6 +2806,44 @@ def summarize_text_content(text, user_id=None):
         timeout=60,
     )
     return response.choices[0].message.content.strip()
+
+
+def generate_sales_copies_from_report(text, user_id=None):
+    session = get_user_session_settings(user_id) if user_id else {"think": "medium", "verbose": False}
+    prompt = (
+        "請根據以下新聞回報內容，產出 5 則招生銷售文案建議。\n"
+        "每則不超過 100 字（含標點），用繁體中文。\n"
+        "只輸出 5 行文案，不要標題、不要序號、不要其他說明。\n"
+        f"思考深度偏好：{session.get('think', 'medium')}。\n\n{text}"
+    )
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        timeout=60,
+    )
+    raw = (response.choices[0].message.content or "").strip()
+    lines = []
+    for line in raw.splitlines():
+        clean = line.strip().lstrip("-•*").strip()
+        if clean:
+            lines.append(clean)
+    if len(lines) < 5:
+        retry_prompt = (
+            "請重新輸出 5 行招生銷售文案（每行 100 字內），只要 5 行文字，不要序號。\n\n"
+            f"{text}"
+        )
+        retry = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": retry_prompt}],
+            timeout=60,
+        )
+        raw = (retry.choices[0].message.content or "").strip()
+        lines = []
+        for line in raw.splitlines():
+            clean = line.strip().lstrip("-•*").strip()
+            if clean:
+                lines.append(clean)
+    return lines[:5]
 
 
 def generate_skill_template(topic):
