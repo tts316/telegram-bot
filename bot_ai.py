@@ -57,12 +57,15 @@ AUTHORIZED_USERS_FILE = os.path.join(DATA_DIR, "authorized_users.json")
 PAIR_CODES_FILE = os.path.join(DATA_DIR, "pending_pair_codes.json")
 SCHEDULE_EXECUTION_LOG_FILE = os.path.join(DATA_DIR, "schedule_execution_log.json")
 SESSION_SETTINGS_FILE = os.path.join(DATA_DIR, "session_settings.json")
+DAILY_PUSH_CONFIG_FILE = os.path.join(DATA_DIR, "daily_push_config.json")
 LEGACY_GROUP_CONFIG_FILE = os.path.join(BASE_DIR, "group_config.json")
 LEGACY_SCHEDULE_CONFIG_FILE = os.path.join(BASE_DIR, "schedule_config.json")
 LEGACY_AUTHORIZED_USERS_FILE = os.path.join(BASE_DIR, "authorized_users.json")
 LEGACY_PAIR_CODES_FILE = os.path.join(BASE_DIR, "pending_pair_codes.json")
 LEGACY_SCHEDULE_EXECUTION_LOG_FILE = os.path.join(BASE_DIR, "schedule_execution_log.json")
 LEGACY_SESSION_SETTINGS_FILE = os.path.join(BASE_DIR, "session_settings.json")
+LEGACY_DAILY_PUSH_CONFIG_FILE = os.path.join(BASE_DIR, "daily_push_config.json")
+DAILY_PUSH_SCHEDULE_NAME = "每日AI文案"
 ALLOWED_REPORT_TYPES = ["marketing", "report", "optimize", "daily_push"]
 ADMIN_USER_IDS = {
     int(value.strip())
@@ -384,6 +387,39 @@ def load_schedule_config():
 
 def save_schedule_config(data):
     save_json(SCHEDULE_CONFIG_FILE, data)
+
+
+def load_daily_push_config():
+    try:
+        return load_json_with_fallback(
+            DAILY_PUSH_CONFIG_FILE,
+            LEGACY_DAILY_PUSH_CONFIG_FILE if DAILY_PUSH_CONFIG_FILE != LEGACY_DAILY_PUSH_CONFIG_FILE else None,
+            {},
+        ) or {}
+    except Exception as e:
+        logger.warning("load_daily_push_config error: %s", e)
+        return {}
+
+
+def save_daily_push_config(data):
+    save_json(DAILY_PUSH_CONFIG_FILE, data)
+
+
+def get_effective_daily_push_config():
+    daily_conf = get_effective_daily_push_config()
+    if daily_conf.get("hour") is not None and daily_conf.get("minute") is not None:
+        return daily_conf
+    if TARGET_CHAT_ID:
+        return {
+            "name": DAILY_PUSH_SCHEDULE_NAME,
+            "hour": 9,
+            "minute": 0,
+            "chat_id": int(TARGET_CHAT_ID),
+            "group_id": GROUP_CHAT_ID,
+            "owner_user_id": int(TARGET_CHAT_ID),
+            "owner_name": "",
+        }
+    return {}
 
 
 def build_schedule_job_name(chat_id, schedule_name):
@@ -1362,6 +1398,7 @@ def format_schedule_detail(schedule_name, item):
 
 def get_schedule_for_chat(chat_id, schedule_name):
     config = load_schedule_config()
+    daily_conf = load_daily_push_config()
     item = config.get(schedule_name)
     if not item or int(item.get("chat_id", 0)) != chat_id:
         return config, None
@@ -1703,6 +1740,19 @@ async def settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name=str(chat_id)
         )
 
+        save_daily_push_config(
+            {
+                "name": DAILY_PUSH_SCHEDULE_NAME,
+                "hour": hour,
+                "minute": minute,
+                "chat_id": chat_id,
+                "group_id": GROUP_CHAT_ID,
+                "owner_user_id": int(update.effective_user.id) if update.effective_user else chat_id,
+                "owner_name": update.effective_user.full_name if update.effective_user else "",
+                "updated_at": datetime.datetime.now(tz).isoformat(),
+            }
+        )
+
         await update.message.reply_text(f"✅ 推播設定完成：每天 {hour:02d}:{minute:02d}")
 
     except Exception as e:
@@ -1788,6 +1838,39 @@ async def showschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("- 尚未設定任何自訂排程")
 
     await update.message.reply_text("\n".join(lines))
+
+
+async def showschedules_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    config = load_schedule_config()
+    daily_conf = load_daily_push_config()
+
+    lines = ["📆 目前排程設定："]
+    has_item = False
+
+    for schedule_name, item in sorted(config.items()):
+        has_item = True
+        task_status = "已設任務" if item.get("task_prompt") else "預設文案"
+        lines.append(
+            f"- {schedule_name} → {item['hour']:02d}:{item['minute']:02d} / 群組 {item['group_id']} / {task_status} / 建立者 {item.get('owner_name') or item.get('owner_user_id', item['chat_id'])}"
+        )
+
+    if daily_conf.get("hour") is not None and daily_conf.get("minute") is not None:
+        has_item = True
+        owner_label = daily_conf.get("owner_name") or daily_conf.get("owner_user_id") or daily_conf.get("chat_id", "")
+        lines.append(
+            f"- {DAILY_PUSH_SCHEDULE_NAME} → {int(daily_conf['hour']):02d}:{int(daily_conf['minute']):02d} / 群組 {GROUP_CHAT_ID} / daily_push / 建立者 {owner_label}"
+        )
+
+    if not has_item:
+        lines.append("- 尚未設定任何自訂排程")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+showschedules = showschedules_v2
 
 
 async def delschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1927,6 +2010,47 @@ async def viewschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_schedule_detail(schedule_name, item))
 
 
+async def viewschedule_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/viewschedule 排程名稱")
+        return
+
+    schedule_name = context.args[0].strip()
+    normalized_name = schedule_name.lower()
+    _, item = get_schedule_any(normalized_name)
+    if item:
+        await update.message.reply_text(format_schedule_detail(schedule_name, item))
+        return
+
+    if normalized_name == DAILY_PUSH_SCHEDULE_NAME.lower():
+        daily_conf = get_effective_daily_push_config()
+        if daily_conf.get("hour") is None or daily_conf.get("minute") is None:
+            await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+            return
+
+        detail = "\n".join(
+            [
+                "📌 排程詳細資料",
+                f"名稱：{DAILY_PUSH_SCHEDULE_NAME}",
+                f"時間：{int(daily_conf['hour']):02d}:{int(daily_conf['minute']):02d}",
+                f"群組ID：{GROUP_CHAT_ID}",
+                f"建立者 chat_id：{daily_conf.get('chat_id', '')}",
+                f"最後更新：{daily_conf.get('updated_at', '')}",
+                "任務內容：預設 AI 文案（daily_push）",
+            ]
+        )
+        await update.message.reply_text(detail)
+        return
+
+    await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+
+
+viewschedule = viewschedule_v2
+
+
 async def updateschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_operator(update):
         return
@@ -2052,6 +2176,64 @@ async def runschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⚠️ 手動執行排程失敗：{schedule_name}\n原因：{e}"
         )
+
+
+async def runschedule_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/runschedule 排程名稱")
+        return
+
+    schedule_name = context.args[0].strip()
+    normalized_name = schedule_name.lower()
+    config = load_schedule_config()
+    item = config.get(normalized_name) or config.get(schedule_name)
+    if item:
+        await update.message.reply_text(f"🧪 正在手動執行排程：{schedule_name}")
+        try:
+            await execute_schedule_push(
+                context.bot,
+                chat_id=item["chat_id"],
+                schedule_name=schedule_name,
+                group_id=item["group_id"],
+                task_prompt=item.get("task_prompt", ""),
+                trigger_type="manual",
+            )
+            await update.message.reply_text(f"✅ 已手動執行排程：{schedule_name}")
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ 手動執行排程失敗：{schedule_name}\n原因：{e}")
+        return
+
+    if normalized_name == DAILY_PUSH_SCHEDULE_NAME.lower():
+        daily_conf = get_effective_daily_push_config()
+        if daily_conf.get("hour") is None or daily_conf.get("minute") is None:
+            await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+            return
+
+        class _ManualJob:
+            def __init__(self, chat_id):
+                self.chat_id = chat_id
+
+        await update.message.reply_text(f"🧪 正在手動執行排程：{schedule_name}")
+        try:
+            await daily_push(
+                type(
+                    "ManualContext",
+                    (),
+                    {"bot": context.bot, "job": _ManualJob(daily_conf.get("chat_id", update.effective_chat.id))},
+                )()
+            )
+            await update.message.reply_text(f"✅ 已手動執行排程：{schedule_name}")
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ 手動執行排程失敗：{schedule_name}\n原因：{e}")
+        return
+
+    await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+
+
+runschedule = runschedule_v2
 
 
 async def exportschedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3478,17 +3660,18 @@ def main():
         "weather"
     ], openclaw_platform_command))
 
-    if TARGET_CHAT_ID:
+    daily_conf = get_effective_daily_push_config()
+    if daily_conf.get("hour") is not None and daily_conf.get("minute") is not None:
         try:
             app.job_queue.run_daily(
                 daily_push,
-                time=time(hour=9, minute=0, tzinfo=tz),
-                chat_id=int(TARGET_CHAT_ID),
-                name=str(TARGET_CHAT_ID)
+                time=time(hour=int(daily_conf["hour"]), minute=int(daily_conf["minute"]), tzinfo=tz),
+                chat_id=int(daily_conf.get("chat_id") or TARGET_CHAT_ID or 0),
+                name=str(daily_conf.get("chat_id") or TARGET_CHAT_ID)
             )
-            logger.info("Default daily push scheduled for TARGET_CHAT_ID=%s", TARGET_CHAT_ID)
+            logger.info("Loaded daily push schedule for %s at %02d:%02d", DAILY_PUSH_SCHEDULE_NAME, int(daily_conf["hour"]), int(daily_conf["minute"]))
         except Exception as e:
-            logger.exception("Default schedule error: %s", e)
+            logger.exception("Daily push schedule error: %s", e)
 
     schedule_config = load_schedule_config()
     for schedule_name, item in schedule_config.items():
