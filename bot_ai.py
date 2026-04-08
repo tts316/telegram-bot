@@ -2840,7 +2840,10 @@ def generate_sales_copies_from_report(text, user_id=None):
     session = get_user_session_settings(user_id) if user_id else {"think": "medium", "verbose": False}
     prompt = (
         "請根據以下新聞回報內容，產出 5 則招生銷售文案建議。\n"
-        "每則不超過 100 字（含標點），用繁體中文。\n"
+        "每則 50~100 字（含標點），用繁體中文。\n"
+        "文案需引用前面新聞中的具體資訊，例如公司名稱或數據。\n"
+        "若新聞未提供明確數據，不要硬編數字，可用趨勢描述取代。\n"
+        "至少提到薪資提升幅度或薪資區間（若新聞有資料）。\n"
         "只輸出 5 行文案，不要標題、不要序號、不要其他說明。\n"
         f"思考深度偏好：{session.get('think', 'medium')}。\n\n{text}"
     )
