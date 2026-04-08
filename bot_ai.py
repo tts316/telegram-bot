@@ -406,7 +406,8 @@ def save_daily_push_config(data):
 
 
 def get_effective_daily_push_config():
-    daily_conf = get_effective_daily_push_config()
+    ＃daily_conf = get_effective_daily_push_config()
+    daily_conf = load_daily_push_config()
     if daily_conf.get("hour") is not None and daily_conf.get("minute") is not None:
         return daily_conf
     if TARGET_CHAT_ID:
