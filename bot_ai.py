@@ -1407,7 +1407,28 @@ def get_schedule_for_chat(chat_id, schedule_name):
 
 def get_schedule_any(schedule_name):
     config = load_schedule_config()
-    return config, config.get(schedule_name)
+    item = config.get(schedule_name)
+    if item:
+        return config, item
+
+    if str(schedule_name).lower() == DAILY_PUSH_SCHEDULE_NAME.lower():
+        daily_conf = get_effective_daily_push_config()
+        if daily_conf.get("hour") is not None and daily_conf.get("minute") is not None:
+            return (
+                config,
+                {
+                    "chat_id": int(daily_conf.get("chat_id") or TARGET_CHAT_ID or 0),
+                    "hour": int(daily_conf["hour"]),
+                    "minute": int(daily_conf["minute"]),
+                    "group_id": int(GROUP_CHAT_ID),
+                    "task_prompt": "",
+                    "owner_user_id": int(daily_conf.get("owner_user_id") or daily_conf.get("chat_id") or 0),
+                    "owner_name": str(daily_conf.get("owner_name") or "").strip(),
+                    "created_at": str(daily_conf.get("created_at") or "").strip(),
+                    "updated_at": str(daily_conf.get("updated_at") or "").strip(),
+                },
+            )
+    return config, None
 
 
 async def apply_schedule_task(update: Update, context: ContextTypes.DEFAULT_TYPE, schedule_name: str, task_prompt: str):
