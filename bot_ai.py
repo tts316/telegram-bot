@@ -66,6 +66,14 @@ LEGACY_SCHEDULE_EXECUTION_LOG_FILE = os.path.join(BASE_DIR, "schedule_execution_
 LEGACY_SESSION_SETTINGS_FILE = os.path.join(BASE_DIR, "session_settings.json")
 LEGACY_DAILY_PUSH_CONFIG_FILE = os.path.join(BASE_DIR, "daily_push_config.json")
 DAILY_PUSH_SCHEDULE_NAME = "每日AI文案"
+DAILY_PUSH_ALIASES = {
+    "每日ai文案",
+    "每日AI文案",
+    "daily_push",
+    "daily",
+    "dailyai",
+    "ai文案",
+}
 ALLOWED_REPORT_TYPES = ["marketing", "report", "optimize", "daily_push"]
 ADMIN_USER_IDS = {
     int(value.strip())
@@ -1411,7 +1419,7 @@ def get_schedule_any(schedule_name):
     if item:
         return config, item
 
-    if str(schedule_name).lower() == DAILY_PUSH_SCHEDULE_NAME.lower():
+    if str(schedule_name).lower() in DAILY_PUSH_ALIASES or str(schedule_name).lower() == DAILY_PUSH_SCHEDULE_NAME.lower():
         daily_conf = get_effective_daily_push_config()
         if daily_conf.get("hour") is not None and daily_conf.get("minute") is not None:
             return (
@@ -1888,6 +1896,38 @@ async def showschedules_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
 showschedules = showschedules_v2
 
 
+async def showschedules_v3(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    config = load_schedule_config()
+    lines = ["📆 目前排程設定："]
+    has_item = False
+
+    for schedule_name, item in sorted(config.items()):
+        has_item = True
+        task_status = "已設任務" if item.get("task_prompt") else "預設文案"
+        lines.append(
+            f"- {schedule_name} → {item['hour']:02d}:{item['minute']:02d} / 群組 {item['group_id']} / {task_status} / 建立者 {item.get('owner_name') or item.get('owner_user_id', item['chat_id'])}"
+        )
+
+    daily_conf = get_effective_daily_push_config()
+    if daily_conf.get("hour") is not None and daily_conf.get("minute") is not None:
+        has_item = True
+        owner_label = daily_conf.get("owner_name") or daily_conf.get("owner_user_id") or daily_conf.get("chat_id", "")
+        lines.append(
+            f"- {DAILY_PUSH_SCHEDULE_NAME} → {int(daily_conf['hour']):02d}:{int(daily_conf['minute']):02d} / 群組 {GROUP_CHAT_ID} / daily_push / 建立者 {owner_label}"
+        )
+
+    if not has_item:
+        lines.append("- 尚未設定任何自訂排程")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+showschedules = showschedules_v3
+
+
 async def delschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_operator(update):
         return
@@ -2045,6 +2085,47 @@ async def viewschedule_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 viewschedule = viewschedule_v2
+
+
+async def viewschedule_v3(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_operator(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ 用法：/viewschedule 排程名稱")
+        return
+
+    schedule_name = context.args[0].strip()
+    normalized_name = schedule_name.lower()
+    _, item = get_schedule_any(normalized_name)
+    if item:
+        await update.message.reply_text(format_schedule_detail(schedule_name, item))
+        return
+
+    if normalized_name in DAILY_PUSH_ALIASES or normalized_name == DAILY_PUSH_SCHEDULE_NAME.lower():
+        daily_conf = get_effective_daily_push_config()
+        if daily_conf.get("hour") is None or daily_conf.get("minute") is None:
+            await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+            return
+
+        detail = "\n".join(
+            [
+                "📌 排程詳細資料",
+                f"名稱：{DAILY_PUSH_SCHEDULE_NAME}",
+                f"時間：{int(daily_conf['hour']):02d}:{int(daily_conf['minute']):02d}",
+                f"群組ID：{GROUP_CHAT_ID}",
+                f"建立者 chat_id：{daily_conf.get('chat_id', '')}",
+                f"最後更新：{daily_conf.get('updated_at', '')}",
+                "任務內容：預設 AI 文案（daily_push）",
+            ]
+        )
+        await update.message.reply_text(detail)
+        return
+
+    await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
+
+
+viewschedule = viewschedule_v3
 
 
 async def updateschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
