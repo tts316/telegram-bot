@@ -1857,12 +1857,6 @@ async def showschedules_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- {schedule_name} → {item['hour']:02d}:{item['minute']:02d} / 群組 {item['group_id']} / {task_status} / 建立者 {item.get('owner_name') or item.get('owner_user_id', item['chat_id'])}"
         )
 
-    if daily_conf.get("hour") is not None and daily_conf.get("minute") is not None:
-        has_item = True
-        owner_label = daily_conf.get("owner_name") or daily_conf.get("owner_user_id") or daily_conf.get("chat_id", "")
-        lines.append(
-            f"- {DAILY_PUSH_SCHEDULE_NAME} → {int(daily_conf['hour']):02d}:{int(daily_conf['minute']):02d} / 群組 {GROUP_CHAT_ID} / daily_push / 建立者 {owner_label}"
-        )
 
     if not has_item:
         lines.append("- 尚未設定任何自訂排程")
@@ -2025,25 +2019,6 @@ async def viewschedule_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(format_schedule_detail(schedule_name, item))
         return
 
-    if normalized_name == DAILY_PUSH_SCHEDULE_NAME.lower():
-        daily_conf = get_effective_daily_push_config()
-        if daily_conf.get("hour") is None or daily_conf.get("minute") is None:
-            await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
-            return
-
-        detail = "\n".join(
-            [
-                "📌 排程詳細資料",
-                f"名稱：{DAILY_PUSH_SCHEDULE_NAME}",
-                f"時間：{int(daily_conf['hour']):02d}:{int(daily_conf['minute']):02d}",
-                f"群組ID：{GROUP_CHAT_ID}",
-                f"建立者 chat_id：{daily_conf.get('chat_id', '')}",
-                f"最後更新：{daily_conf.get('updated_at', '')}",
-                "任務內容：預設 AI 文案（daily_push）",
-            ]
-        )
-        await update.message.reply_text(detail)
-        return
 
     await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
 
@@ -2206,29 +2181,6 @@ async def runschedule_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⚠️ 手動執行排程失敗：{schedule_name}\n原因：{e}")
         return
 
-    if normalized_name == DAILY_PUSH_SCHEDULE_NAME.lower():
-        daily_conf = get_effective_daily_push_config()
-        if daily_conf.get("hour") is None or daily_conf.get("minute") is None:
-            await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
-            return
-
-        class _ManualJob:
-            def __init__(self, chat_id):
-                self.chat_id = chat_id
-
-        await update.message.reply_text(f"🧪 正在手動執行排程：{schedule_name}")
-        try:
-            await daily_push(
-                type(
-                    "ManualContext",
-                    (),
-                    {"bot": context.bot, "job": _ManualJob(daily_conf.get("chat_id", update.effective_chat.id))},
-                )()
-            )
-            await update.message.reply_text(f"✅ 已手動執行排程：{schedule_name}")
-        except Exception as e:
-            await update.message.reply_text(f"⚠️ 手動執行排程失敗：{schedule_name}\n原因：{e}")
-        return
 
     await update.message.reply_text(f"⚠️ 找不到排程：{schedule_name}")
 
@@ -3660,18 +3612,7 @@ def main():
         "weather"
     ], openclaw_platform_command))
 
-    daily_conf = get_effective_daily_push_config()
-    if daily_conf.get("hour") is not None and daily_conf.get("minute") is not None:
-        try:
-            app.job_queue.run_daily(
-                daily_push,
-                time=time(hour=int(daily_conf["hour"]), minute=int(daily_conf["minute"]), tzinfo=tz),
-                chat_id=int(daily_conf.get("chat_id") or TARGET_CHAT_ID or 0),
-                name=str(daily_conf.get("chat_id") or TARGET_CHAT_ID)
-            )
-            logger.info("Loaded daily push schedule for %s at %02d:%02d", DAILY_PUSH_SCHEDULE_NAME, int(daily_conf["hour"]), int(daily_conf["minute"]))
-        except Exception as e:
-            logger.exception("Daily push schedule error: %s", e)
+
 
     schedule_config = load_schedule_config()
     for schedule_name, item in schedule_config.items():
