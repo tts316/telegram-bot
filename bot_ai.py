@@ -29,20 +29,16 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from openai import OpenAI
+import ai_client
 from gsheet import get_tracking_data
 
 # ===== 環境變數 =====
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 NEWS_SEARCH_TIMEOUT = int(os.getenv("NEWS_SEARCH_TIMEOUT", "10"))
 WEATHER_LOCATION = os.getenv("WEATHER_LOCATION", "Taipei")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 TRACK_BASE_URL = os.getenv("TRACK_BASE_URL", "https://your-domain.com")
 LANDING_PAGE_URL = os.getenv("LANDING_PAGE_URL", "https://your-landing-page.com")
@@ -86,12 +82,11 @@ if TARGET_CHAT_ID:
     except ValueError:
         pass
 
-if not TOKEN or not OPENAI_API_KEY:
-    raise ValueError("❌ 缺少必要環境變數：TELEGRAM_BOT_TOKEN / OPENAI_API_KEY")
+if not TOKEN:
+    raise ValueError("❌ 缺少必要環境變數：TELEGRAM_BOT_TOKEN")
 
 # ===== 基本設定 =====
 tz = pytz.timezone("Asia/Taipei")
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -789,14 +784,9 @@ def generate_marketing(chat_id):
 """
 
         try:
-            response = client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=45
-            )
-            result = response.choices[0].message.content
+            result = ai_client.generate(prompt, timeout=45)
         except Exception as e:
-            logger.exception("OpenAI generate error: %s", e)
+            logger.exception("Claude generate error: %s", e)
             result = (
                 "【AI文案（備援模式）】\n\n"
                 "🔥 AI轉職正夯！\n"
@@ -846,69 +836,6 @@ def update_campaign_performance(campaign_id, click=0, lead=0):
         campaign_performance[campaign_id]["lead"] += lead
 
 
-# ===== 文案優化 =====
-def optimize_marketing(chat_id):
-    try:
-        recent = [c for c in campaign_logs if c["chat_id"] == chat_id][-2:]
-
-        if len(recent) < 2:
-            return "⚠️ 至少需要先產生 2 筆文案，再執行 /optimize"
-
-        c1, c2 = recent
-        p1 = get_campaign_performance(c1["campaign_id"])
-        p2 = get_campaign_performance(c2["campaign_id"])
-
-        prompt = f"""
-你是台灣招生行銷優化專家
-
-以下是兩則文案：
-
-【文案A】
-{c1['content']}
-
-成效：
-- 點擊：{p1.get('click', 0)}
-- 留單：{p1.get('lead', 0)}
-
-【文案B】
-{c2['content']}
-
-成效：
-- 點擊：{p2.get('click', 0)}
-- 留單：{p2.get('lead', 0)}
-
-請完成：
-1. 分析哪一篇表現較好
-2. 說明原因
-3. 產出一篇更高轉換率的優化版文案
-4. 提供更強 CTA
-"""
-
-        prompt += (
-            f"\n\n本次需要覆蓋的課程/關鍵字共有 {len(queries)} 個：\n"
-            + "\n".join(f"- {query}" for query in queries)
-            + "\n\n請務必逐一處理每個課程/關鍵字，不要只挑其中 3 則。"
-        )
-
-        prompt += (
-            f"\n\n本次需要覆蓋的課程/關鍵字共有 {len(queries)} 個：\n"
-            + "\n".join(f"- {query}" for query in queries)
-            + "\n\n請務必逐一處理每個課程/關鍵字，不要只挑其中 3 則。"
-        )
-
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=45
-        )
-
-        return response.choices[0].message.content
-
-    except Exception as e:
-        logger.exception("optimize_marketing error: %s", e)
-        return "⚠️ 優化失敗"
-
-
 # ===== Dashboard / 報表 =====
 def optimize_marketing(chat_id):
     try:
@@ -945,13 +872,9 @@ def optimize_marketing(chat_id):
 4. 更強的 CTA
 """
 
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=45
-        )
+        response_text = ai_client.generate(prompt, timeout=45)
 
-        return response.choices[0].message.content
+        return response_text
 
     except Exception as e:
         logger.exception("optimize_marketing error: %s", e)
@@ -1044,12 +967,7 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
 若資訊不足，請明確標註「待人工確認」而不要編造。
 """
 
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=45
-        )
-        result = response.choices[0].message.content
+        result = ai_client.generate(prompt, timeout=45)
 
         if links:
             clean_links = dedupe_links(links)
@@ -1104,12 +1022,7 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
 6. 若使用薪資或產業趨勢補充說法，沒有真實來源就不要編造數字。
 """
 
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=45
-        )
-        result = response.choices[0].message.content
+        result = ai_client.generate(prompt, timeout=45)
 
         course_lines = []
         for query in queries:
@@ -1334,12 +1247,8 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
 5. 沒有真實來源就不要編造薪資數字或新聞內容。
 """
 
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=60
-        )
-        result = render_compact_html_text((response.choices[0].message.content or "").strip())
+        response_text = ai_client.generate(prompt, timeout=60)
+        result = render_compact_html_text((response_text or "").strip())
 
         course_lines = []
         for query in queries:
@@ -1406,7 +1315,6 @@ def format_schedule_detail(schedule_name, item):
 
 def get_schedule_for_chat(chat_id, schedule_name):
     config = load_schedule_config()
-    daily_conf = load_daily_push_config()
     item = config.get(schedule_name)
     if not item or int(item.get("chat_id", 0)) != chat_id:
         return config, None
@@ -1874,7 +1782,6 @@ async def showschedules_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     config = load_schedule_config()
-    daily_conf = load_daily_push_config()
 
     lines = ["📆 目前排程設定："]
     has_item = False
@@ -2649,34 +2556,15 @@ ARTICLE_TEXT_CACHE = {}
 
 
 def fetch_article_text(url, timeout=None):
-    cleaned = (url or "").strip()
-    if not cleaned:
-        return ""
+    # 抓內文的實作早已被誤插入的 compact_runtime_state 切斷、從未執行（實際只回傳空值），
+    # 2026-11-01 維持現況只刪不可達程式碼；要恢復需先評估逐篇抓網頁對排程耗時的影響（見 git 歷史）。
+    return ""
 
 
 def compact_runtime_state():
     cleared = len(ARTICLE_TEXT_CACHE)
     ARTICLE_TEXT_CACHE.clear()
     return cleared
-
-    cached = ARTICLE_TEXT_CACHE.get(cleaned)
-    if cached is not None:
-        return cached
-
-    try:
-        response = requests.get(
-            cleaned,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=timeout or max(NEWS_SEARCH_TIMEOUT, 12),
-        )
-        soup = BeautifulSoup(response.text, "html.parser")
-        text = " ".join(soup.stripped_strings)
-        ARTICLE_TEXT_CACHE[cleaned] = text[:5000]
-        return ARTICLE_TEXT_CACHE[cleaned]
-    except Exception as e:
-        logger.warning("fetch_article_text error (%s): %s", cleaned, e)
-        ARTICLE_TEXT_CACHE[cleaned] = ""
-        return ""
 
 
 def is_promotional_article(title, url):
@@ -2882,12 +2770,8 @@ def generate_custom_schedule_task(chat_id, schedule_name, task_prompt):
 5. 回覆格式要精簡、適合 Telegram 閱讀。
 """
 
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=70
-        )
-        result = render_compact_html_text((response.choices[0].message.content or "").strip())
+        response_text = ai_client.generate(prompt, timeout=70)
+        result = render_compact_html_text((response_text or "").strip())
 
         course_lines = []
         for query in queries:
@@ -3019,13 +2903,13 @@ def get_status_text(user=None):
     return "\n".join(
         [
             "🟢 Bot 狀態正常",
-            f"模型：{OPENAI_MODEL}",
+            f"模型：Claude {ai_client.get_model()}",
             f"資料目錄：{DATA_DIR}",
             f"自訂排程數：{schedule_count}",
             f"管理者數：{len(auth.get('admins', []))}",
             f"操作員數：{len(auth.get('operators', []))}",
             f"NEWS_API_KEY：{'已設定' if NEWS_API_KEY else '未設定'}",
-            f"GEMINI_API_KEY：{'已設定' if GEMINI_API_KEY else '未設定'}",
+            f"Claude AI：{'已啟用' if ai_client.is_enabled() else '未啟用（無金鑰）'}",
             f"思考等級：{session.get('think', 'medium')}",
             f"詳細模式：{'開啟' if session.get('verbose') else '關閉'}",
         ]
@@ -3064,12 +2948,11 @@ def summarize_text_content(text, user_id=None):
         f"請用繁體中文做{detail}摘要，條列重點、關鍵結論與可執行建議。"
         f"思考深度偏好：{session.get('think', 'medium')}。\n\n{text}"
     )
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=60,
-    )
-    return response.choices[0].message.content.strip()
+    try:
+        response_text = ai_client.generate(prompt, timeout=60)
+    except ai_client.AIUnavailable as e:
+        return str(e)
+    return response_text.strip()
 
 
 def generate_sales_copies_from_report(text, user_id=None):
@@ -3083,12 +2966,11 @@ def generate_sales_copies_from_report(text, user_id=None):
         "只輸出 5 行文案，不要標題、不要序號、不要其他說明。\n"
         f"思考深度偏好：{session.get('think', 'medium')}。\n\n{text}"
     )
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=60,
-    )
-    raw = (response.choices[0].message.content or "").strip()
+    try:
+        response_text = ai_client.generate(prompt, timeout=60)
+    except ai_client.AIUnavailable:
+        return []
+    raw = (response_text or "").strip()
     lines = []
     for line in raw.splitlines():
         clean = line.strip().lstrip("-•*").strip()
@@ -3099,12 +2981,8 @@ def generate_sales_copies_from_report(text, user_id=None):
             "請重新輸出 5 行招生銷售文案（每行 100 字內），只要 5 行文字，不要序號。\n\n"
             f"{text}"
         )
-        retry = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": retry_prompt}],
-            timeout=60,
-        )
-        raw = (retry.choices[0].message.content or "").strip()
+        retry_text = ai_client.generate(retry_prompt, timeout=60)
+        raw = (retry_text or "").strip()
         lines = []
         for line in raw.splitlines():
             clean = line.strip().lstrip("-•*").strip()
@@ -3137,7 +3015,7 @@ def list_tool_text():
     return "\n".join(
         [
             "🧰 可用工具 / 能力",
-            "- OpenAI：文案、摘要、優化",
+            "- Claude：文案、摘要、優化",
             "- Google News：新聞搜尋",
             "- NewsAPI：補強新聞搜尋",
             "- Google Sheets：追蹤資料讀取",
@@ -3180,34 +3058,14 @@ def generate_nano_pdf_text(text):
     )
 
 
-def run_gemini_prompt(text):
+def run_ai_prompt(text):
     clean_text = (text or "").strip()
     if not clean_text:
-        return "⚠️ 用法：/gemini 問題內容，或回覆文字後輸入 /gemini"
-
-    if not GEMINI_API_KEY:
-        return "\n".join(
-            [
-                "ℹ️ 目前未設定 GEMINI_API_KEY。",
-                "你可以把下面這段直接貼到 Gemini：",
-                "",
-                clean_text,
-            ]
-        )
-
-    response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
-        headers={"Content-Type": "application/json"},
-        json={"contents": [{"parts": [{"text": clean_text}]}]},
-        timeout=40,
-    )
-    data = response.json()
-    candidates = data.get("candidates") or []
-    if not candidates:
-        return "⚠️ Gemini 沒有回傳內容。"
-    parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
-    text_parts = [part.get("text", "").strip() for part in parts if part.get("text")]
-    return "\n".join(text_parts).strip() or "⚠️ Gemini 沒有可讀取內容。"
+        return "⚠️ 用法：/claude 問題內容，或回覆文字後輸入 /claude（舊指令 /gemini 相同）"
+    try:
+        return ai_client.generate(clean_text, timeout=60).strip() or "⚠️ Claude 沒有回傳內容。"
+    except ai_client.AIUnavailable as e:
+        return str(e)
 
 
 INSTALLED_COMMAND_HELP = [
@@ -3219,7 +3077,7 @@ INSTALLED_COMMAND_HELP = [
     ("/addadmin user_id", "新增第二管理者。", "/addadmin 123456789"),
     ("/deleteallpairs", "清空待核准配對碼。", "/deleteallpairs"),
     ("/status", "查看 bot 狀態、模型、排程數量與 API 設定。", "/status"),
-    ("/model", "查看目前 OpenAI 模型。", "/model"),
+    ("/model", "查看目前 Claude 模型。", "/model"),
     ("/models", "查看目前模型與可切換方式。", "/models"),
     ("/model_usage", "查看模型使用概況。", "/model_usage"),
     ("/weather [地點]", "查詢天氣；未填則用預設地點。", "/weather Taipei"),
@@ -3227,8 +3085,8 @@ INSTALLED_COMMAND_HELP = [
     ("/summarize 文字", "摘要一段文字，或回覆文字後使用。", "/summarize 請幫我摘要這段內容"),
     ("/skill_creator 主題", "產生可重用的 skill / 任務模板。", "/skill_creator 每日競品分析"),
     ("/skill [主題]", "查看 skill 類型，或直接產生特定主題模板。", "/skill 招生新聞"),
-    ("/gemini 內容", "若有 GEMINI_API_KEY 則呼叫 Gemini，否則產出可貼給 Gemini 的 prompt。", "/gemini 幫我整理這段需求"),
-    ("/gemini_status", "顯示 Gemini 是否已接上與目前模型。", "/gemini_status"),
+    ("/claude 內容", "呼叫 Claude 回答（舊指令 /gemini 為別名）。", "/claude 幫我整理這段需求"),
+    ("/claude_status", "顯示 Claude 是否已啟用與目前模型（舊指令 /gemini_status 為別名）。", "/claude_status"),
     ("/dock_telegram", "顯示目前已在 Telegram 模式。", "/dock_telegram"),
     ("/think low|medium|high", "查看或設定個人思考等級。", "/think high"),
     ("/verbose on|off", "查看或切換個人詳細模式。", "/verbose on"),
@@ -3415,7 +3273,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🤖 目前模型：{OPENAI_MODEL}")
+    await update.message.reply_text(f"🤖 目前模型：Claude {ai_client.get_model()}")
 
 
 async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3423,9 +3281,8 @@ async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n".join(
             [
                 "📚 模型清單",
-                f"目前使用：{OPENAI_MODEL}",
-                "可切換方式：修改 Zeabur 環境變數 OPENAI_MODEL",
-                "Gemini 預設：{}".format(GEMINI_MODEL),
+                f"目前使用：Claude {ai_client.get_model()}",
+                "切換方式：CAAC 主控台「設定 → 全域設定」的預設模型（或環境變數 ANTHROPIC_MODEL 覆寫）",
             ]
         )
     )
@@ -3436,8 +3293,7 @@ async def model_usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "\n".join(
             [
                 "📈 模型使用狀態",
-                f"OpenAI 模型：{OPENAI_MODEL}",
-                f"Gemini 模型：{GEMINI_MODEL}",
+                f"Claude 模型：{ai_client.get_model()}",
                 "目前 bot 尚未實作 token / cost 累計記錄。",
             ]
         )
@@ -3601,7 +3457,7 @@ async def healthcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             [
                 "🩺 Healthcheck",
                 f"Bot：正常",
-                f"模型：{OPENAI_MODEL}",
+                f"模型：Claude {ai_client.get_model()}",
                 f"資料目錄：{DATA_DIR}",
                 f"排程數：{schedule_count}",
                 f"執行紀錄數：{len(last_logs)}",
@@ -3619,25 +3475,25 @@ async def nano_pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def claude_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await send_long_message(
             context.bot,
             update.effective_chat.id,
-            run_gemini_prompt(get_command_input(update, context)),
+            run_ai_prompt(get_command_input(update, context)),
         )
     except Exception as e:
-        await update.message.reply_text(f"⚠️ gemini 執行失敗：{e}")
+        await update.message.reply_text(f"⚠️ Claude 執行失敗：{e}")
 
 
-async def gemini_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = "已設定" if GEMINI_API_KEY else "未設定"
+async def claude_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = "已啟用" if ai_client.is_enabled() else "未啟用（無金鑰）"
     await update.message.reply_text(
         "\n".join(
             [
-                "🔎 Gemini 狀態",
-                f"GEMINI_API_KEY：{status}",
-                f"GEMINI_MODEL：{GEMINI_MODEL}",
+                "🔎 Claude 狀態",
+                f"AI：{status}",
+                f"模型：{ai_client.get_model()}",
             ]
         )
     )
@@ -3662,8 +3518,8 @@ def main():
     app.add_handler(CommandHandler("tools", tools_command))
     app.add_handler(CommandHandler("restart", restart_command))
     app.add_handler(CommandHandler("reset", reset_command))
-    app.add_handler(CommandHandler("gemini", gemini_command))
-    app.add_handler(CommandHandler("gemini_status", gemini_status_command))
+    app.add_handler(CommandHandler(["claude", "gemini"], claude_command))
+    app.add_handler(CommandHandler(["claude_status", "gemini_status"], claude_status_command))
     app.add_handler(CommandHandler("dock_telegram", dock_telegram_command))
     app.add_handler(CommandHandler("think", think_command))
     app.add_handler(CommandHandler("verbose", verbose_command))
